@@ -8,8 +8,9 @@ import readline from 'node:readline';
 import zlib from 'node:zlib';
 import unzipper from 'unzipper';
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
+import { Subscriber } from 'zeromq';
 import {
-  AREA, buildVehicles, stationDepartures, indexTripUpdates, parseCsvLine,
+  AREA, buildVehicles, stationDepartures, indexTripUpdates, parseCsvLine, parseKV6,
   groupStations, thin, modeOf, lineColor, distKm, gtfsSecs, polylineKm, punctuality, osmToRail, cleanStopName,
 } from './lib.js';
 
@@ -320,6 +321,7 @@ function rebuild() {
   const keep = (pos, r) => lineKeys.has(lineKey(r)) || distKm(AREA, pos) <= AREA.radiusKm;
   const headsignOf = (id) => (tripInfo[id]?.headsign ? cleanStopName(tripInfo[id].headsign) : null);
   const vehicles = buildVehicles(vp, liveTrips, routes, stops, Date.now() / 1000, keep, headsignOf);
+  for (const v of vehicles) applyKv6(v, kv6.get(v.id)); // the live stream is newer than OVapi's minute feed
   // previous GPS fix per vehicle, so a browser can estimate speed from its very first snapshot
   const fixes = new Map();
   for (const v of vehicles) {
@@ -333,10 +335,73 @@ function rebuild() {
     vehicles, fetchedAt: t * 1000,
     stats: { since: history.frames[0]?.t ?? t, operators: punctuality(history.tripDelays) },
   };
-  lastMsg = `data: ${JSON.stringify(snapshot)}\n\n`; // serialised once, sent to every client
-  for (const res of clients) res.write(lastMsg);
+  snapshotIds = new Map(vehicles.map((v) => [v.id, v]));
+  lastMsg = null;
+  for (const res of clients) res.write(snapshotMsg());
 }
-let lastMsg = `data: ${JSON.stringify(snapshot)}\n\n`;
+// serialised once per change, sent to every client; patches mark it stale for the next new client
+let lastMsg = null, snapshotIds = new Map();
+const snapshotMsg = () => (lastMsg ??= `data: ${JSON.stringify(snapshot)}\n\n`);
+
+// ---------- KV6 live stream (GOVI, formerly NDOV Loket): positions and stop events within ~1 s ----------
+// OVapi's GTFS-rt refreshes once a minute with ~20 s old positions and says nothing about stops. KV6 reports
+// ARRIVAL / DEPARTURE / ONROUTE per vehicle as it happens. Open best-effort feed, CC0 data, fair use:
+// one connection per consumer. https://govi.nu/realtime.html
+const KV6_ENVELOPES = ['RIG', 'QBUZZ', 'ARR', 'EBS', 'CXX', 'IVU'].map((op) => `/${op}/KV6posinfo`); // RIG = RET + HTM
+const kv6 = new Map(); // vehicle id → { lon, lat, ts, state, stateTs, delay }
+const patches = new Map(); // id → latest state, flushed to browsers every second
+const STATE = { ARRIVAL: 'stop', ONSTOP: 'stop', INIT: 'stop', DEPARTURE: 'moving', ONROUTE: 'moving' };
+
+function applyKv6(v, k) {
+  if (!k) return;
+  if (k.lon != null && k.ts > v.updatedAt) Object.assign(v, { lon: k.lon, lat: k.lat, updatedAt: k.ts });
+  if (k.delay != null) v.delaySec = k.delay;
+  v.state = k.state ?? null;
+  v.stateTs = k.stateTs ?? null;
+}
+
+function onKv6(ev) {
+  if (!ev.ts || ev.type === 'END') { kv6.delete(ev.id); return; }
+  const k = kv6.get(ev.id) ?? {};
+  if (k.stateTs && ev.ts < k.stateTs - 1) return; // late, out-of-order message
+  if (ev.lat != null && !(ev.ts < k.ts)) Object.assign(k, { lon: +ev.lon.toFixed(6), lat: +ev.lat.toFixed(6), ts: ev.ts });
+  if (STATE[ev.type]) Object.assign(k, { state: STATE[ev.type], stateTs: ev.ts });
+  if (ev.delay != null) k.delay = ev.delay;
+  kv6.set(ev.id, k);
+  const v = snapshotIds.get(ev.id); // only vehicles the map shows
+  if (v) { applyKv6(v, k); patches.set(ev.id, v); }
+}
+
+async function listenKv6() {
+  for (;;) {
+    const sock = new Subscriber({ receiveTimeout: 120_000 }); // silence for 2 min = dead connection
+    try {
+      sock.connect('tcp://pubsub.besteffort.ndovloket.nl:7658');
+      for (const e of KV6_ENVELOPES) sock.subscribe(e);
+      console.log('KV6-livestream verbonden');
+      for await (const [, ...parts] of sock) {
+        const body = Buffer.concat(parts);
+        let xml;
+        try { xml = zlib.gunzipSync(body).toString(); } catch { xml = body.toString(); } // gzip, but be lenient
+        for (const ev of parseKV6(xml)) onKv6(ev);
+      }
+    } catch (e) {
+      console.error('KV6-livestream onderbroken, opnieuw over 30 s:', e.message ?? e.code);
+    } finally { sock.close(); }
+    await new Promise((ok) => setTimeout(ok, 30_000));
+  }
+}
+
+setInterval(() => {
+  if (!patches.size) return;
+  // [id, lon, lat, positionTs, state, stateTs, delay] per changed vehicle
+  const rows = [...patches.values()].map((v) => [v.id, v.lon, v.lat, v.updatedAt, v.state, v.stateTs, v.delaySec]);
+  patches.clear();
+  lastMsg = null;
+  const msg = `event: patch\ndata: ${JSON.stringify(rows)}\n\n`;
+  for (const res of clients) res.write(msg);
+}, 1000);
+setInterval(() => { const old = Date.now() / 1000 - 1800; for (const [id, k] of kv6) if ((k.stateTs ?? k.ts) < old) kv6.delete(id); }, 60_000);
 
 // Timelapse downloads are big (a few MB gzipped): compress once per new frame and 10-minute window, not per request.
 let historyGz = { key: '', body: null };
@@ -369,7 +434,7 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/stream') {
     if (clients.size >= MAX_CLIENTS) { res.writeHead(503, { 'Retry-After': '60' }); return res.end(); }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    res.write(lastMsg);
+    res.write(snapshotMsg());
     clients.add(res);
     return req.on('close', () => clients.delete(res));
   }
@@ -399,10 +464,13 @@ http.createServer(async (req, res) => {
 
 await fs.mkdir(DATA, { recursive: true });
 await loadHistory();
-// Positions change often → poll every 10 s; trip updates are a big file → every 30 s. Both conditional.
+// Positions change often → poll every 10 s (only downloads when changed, ~once a minute).
 poll('vehiclePositions.pb'); poll('tripUpdates.pb');
 setInterval(() => poll('vehiclePositions.pb'), 10_000);
-setInterval(() => poll('tripUpdates.pb'), 30_000);
+// trip updates: 1.5 MB gzipped per change (~2 GB/day at once a minute). KV6 now delivers delays live,
+// so every 2 min is enough for destinations and station departures, and halves the traffic.
+setInterval(() => poll('tripUpdates.pb'), 120_000);
+listenKv6(); // runs forever, reconnects itself
 await loadStatic().catch((e) => console.error('Dienstregeling mislukt:', e.message));
 rebuild();
 setInterval(() => loadStatic().catch((e) => console.error('Dienstregeling verversen mislukt:', e.message)), 20 * 60e3); // cheap when cached

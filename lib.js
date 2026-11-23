@@ -18,6 +18,39 @@ export function vehicleModel(operator, mode, label) {
   return f ? { model: f[3], since: f[4] } : null;
 }
 
+// Dutch RD (Rijksdriehoek) metres → WGS84 degrees. Approximation by Schreutelkamp & Strang van Hees,
+// accurate to ~1 m inside the Netherlands — plenty for a vehicle on a map.
+export function rdToWgs84(x, y) {
+  const dX = (x - 155000) * 1e-5, dY = (y - 463000) * 1e-5;
+  const N = 3235.65389 * dY - 32.58297 * dX ** 2 - 0.2475 * dY ** 2 - 0.84978 * dX ** 2 * dY - 0.0655 * dY ** 3
+    - 0.01709 * dX ** 2 * dY ** 2 - 0.00738 * dX + 0.0053 * dX ** 4 - 0.00039 * dX ** 2 * dY ** 3
+    + 0.00033 * dX ** 4 * dY - 0.00012 * dX * dY;
+  const E = 5260.52916 * dX + 105.94684 * dX * dY + 2.45656 * dX * dY ** 2 - 0.81885 * dX ** 3
+    + 0.05594 * dX * dY ** 3 - 0.05607 * dX ** 3 * dY + 0.01199 * dY - 0.00256 * dX ** 3 * dY ** 2
+    + 0.00128 * dX * dY ** 4 + 0.00022 * dY ** 2 - 0.00022 * dX ** 2 + 0.00026 * dX ** 5;
+  return { lat: 52.15517440 + N / 3600, lon: 5.38720621 + E / 3600 };
+}
+
+// KV6posinfo XML (BISON, from the GOVI/NDOV realtime stream) → events. The id matches OVapi's
+// GTFS-rt entity id: operatingday:dataownercode:lineplanningnumber:journeynumber.
+const KV6_TYPES = 'ARRIVAL|DEPARTURE|ONSTOP|ONROUTE|INIT|END|DELAY|OFFROUTE';
+export function parseKV6(xml) {
+  const out = [];
+  for (const [, type, body] of xml.matchAll(new RegExp(`<(?:\\w+:)?(${KV6_TYPES})>([\\s\\S]*?)</(?:\\w+:)?\\1>`, 'g'))) {
+    const f = (name) => body.match(new RegExp(`<(?:\\w+:)?${name}>([^<]*)<`))?.[1];
+    const x = Number(f('rd-x')), y = Number(f('rd-y')), punct = f('punctuality');
+    out.push({
+      type,
+      id: `${f('operatingday')}:${f('dataownercode')}:${f('lineplanningnumber')}:${f('journeynumber')}`,
+      ts: Date.parse(f('timestamp')) / 1000,
+      ...(x > 0 && y > 0 ? rdToWgs84(x, y) : {}), // -1 or missing = no position in this message
+      delay: punct == null || punct === '' ? null : Number(punct),
+      vehicleNo: f('vehiclenumber') ?? null,
+    });
+  }
+  return out;
+}
+
 // Overpass result (route relations + their ways with geometry) → corridors: stretches of track
 // used by the same set of lines, e.g. { lines: ['metro|A', 'metro|B', 'metro|C'], coords }.
 // Drawing each corridor once per line, offset side by side, gives the metro-map look on shared track.

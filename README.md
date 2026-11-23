@@ -54,8 +54,13 @@ en geef de machine 1 GB geheugen.
 
 ## Wat de server doet
 
-- Haalt elke 10 s de voertuigposities en elke 30 s de ritupdates op bij OVapi (alleen bij wijzigingen).
+- Haalt elke 10 s de voertuigposities en elke 2 min de ritupdates op bij OVapi (alleen bij wijzigingen).
   Bezoekers praten alleen met deze server, nooit met OVapi zelf.
+- Luistert met één ZeroMQ-verbinding naar de KV6-livestream van [GOVI](https://govi.nu/realtime.html)
+  (voorheen NDOV Loket, `tcp://pubsub.besteffort.ndovloket.nl:7658`, uitgaand TCP-verkeer moet dus mogen).
+  Die meldt posities, aankomst en vertrek per halte binnen ~1 s; de server stuurt elke seconde de wijzigingen
+  door. Best-effort, fair use: maximaal één verbinding. Valt de stream weg, dan werkt alles door op OVapi.
+  Voor intensief publiek gebruik: meld je aan bij GOVI (govi.nu/aanmelden).
 - Eén keer per dag: dienstregeling downloaden. Nieuwe buslijnen worden via de publieke OSRM-server op de weg
   gelegd (max. 1 verzoek per seconde, daarna gecachet). Metro- en tramsporen komen één keer per week uit
   OpenStreetMap (Overpass API).
@@ -65,6 +70,7 @@ en geef de machine 1 GB geheugen.
 ## Bronnen en licenties
 
 - Dienstregeling en realtime: [OVapi](https://ovapi.nl) (open data van de vervoerders via NDOV).
+- Livestream KV6: [GOVI / Stichting OpenGeo](https://govi.nu) (CC0).
 - Kaarttegels: [OpenFreeMap](https://openfreemap.org), © [OpenStreetMap](https://www.openstreetmap.org/copyright)-bijdragers (ODbL).
 - Metro- en tramsporen: © OpenStreetMap-bijdragers (ODbL).
 - Routes over de weg: [OSRM](https://project-osrm.org) demo-server. Bij veel verkeer of commercieel gebruik: zelf

@@ -230,6 +230,7 @@ function upsertVehicle(v) {
   if (prevFix && v.updatedAt > prevFix[1]) {
     const obs = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, (loc.s - prevFix[0]) / (v.updatedAt - prevFix[1])));
     f.speed = f.g === loc.g && Math.sign(obs) === Math.sign(f.speed) ? 0.6 * obs + 0.4 * f.speed : obs; // smooth, but follow a turnaround at once
+    if (Math.abs(obs) > 1 && v.state !== 'stop') { f.cruise = Math.abs(f.speed); f.dirSign = Math.sign(obs); } // remembered for departures
   } else if (f.g !== loc.g) f.speed = 0;
   if (f.g !== loc.g || f.sDisp == null) f.sDisp = loc.s; // new route geometry: start exactly at the fix
   const r = pointAt(loc.g, loc.s);
@@ -244,6 +245,23 @@ function upsertVehicle(v) {
   f.dirKnown ||= !!f.speed;
 }
 
+// KV6 patches, every second: [id, lon, lat, positionTs, state, stateTs, delay]
+function applyPatch(rows) {
+  for (const [id, lon, lat, ts, st, stTs, delay] of rows) {
+    const f = fleet.get(id);
+    if (!f) continue;
+    const v = f.v, wasStopped = v.state === 'stop', newFix = ts > v.updatedAt;
+    Object.assign(v, { state: st, stateTs: stTs, delaySec: delay ?? v.delaySec });
+    if (newFix) { Object.assign(v, { lon, lat, updatedAt: ts }); upsertVehicle(v); }
+    if (wasStopped && st === 'moving' && f.g) {
+      // DEPARTURE: drive off at its usual speed, counted from the departure moment
+      if (!newFix) { f.sFix = f.sDisp; f.fixTs = stTs; } // no position in the message: from where it stood
+      f.speed = (f.cruise || 6) * (f.dirSign || Math.sign(f.speed) || 1);
+    }
+  }
+  dirty = true;
+}
+
 // where to draw a vehicle this frame (dt = seconds since the previous frame)
 function step(f, nowSec, dt, nowMs) {
   if (!f.g) { // off-route: glide to the fix in ~1 s
@@ -252,7 +270,8 @@ function step(f, nowSec, dt, nowMs) {
     return;
   }
   const len = f.g.cum.at(-1);
-  const age = Math.max(0, Math.min(MAX_AHEAD_S, nowSec - f.fixTs));
+  // at a stop (KV6 ARRIVAL/ONSTOP): stand still until the DEPARTURE message
+  const age = f.v.state === 'stop' ? 0 : Math.max(0, Math.min(MAX_AHEAD_S, nowSec - f.fixTs));
   const sPred = Math.max(0, Math.min(len, f.sFix + f.speed * age));
   const diff = sPred - f.sDisp, dir = Math.sign(f.speed);
   // overshot (it stood at a stop): wait for the prediction instead of driving backwards
@@ -302,7 +321,7 @@ function vehiclePopup(v) {
   const s = status(v.delaySec);
   const kind = `${MODE_NAME[v.mode] ?? 'Voertuig'}${v.vehicleNo ? ` ${v.vehicleNo}` : ''}`;
   return `<div class="pop"><h3>${badge(v)} ${esc(title(v))}</h3><dl>
-    <dt>Status</dt><dd class="${s.cls}">${esc(s.long)}</dd>
+    <dt>Status</dt><dd class="${s.cls}">${esc(s.long)}${v.state === 'stop' ? ' · staat bij halte' : ''}</dd>
     ${v.nextStop ? `<dt>Volgende</dt><dd>${esc(v.nextStop)}${v.nextStopAt ? ` · ${clock(v.nextStopAt)}` : ''}</dd>` : ''}
     <dt>Voertuig</dt><dd>${esc(kind)}${v.model ? `<br><span class="sub">${esc(v.model)} · sinds ${v.since}</span>` : ''}</dd>
     ${v.name && !/^lijn$/i.test(v.name) ? `<dt>Lijn</dt><dd>${esc(v.name)}</dd>` : ''}
@@ -435,6 +454,7 @@ function onSnapshot(data) {
 
 const es = new EventSource('/api/stream');
 es.onmessage = (e) => onSnapshot(JSON.parse(e.data));
+es.addEventListener('patch', (e) => applyPatch(JSON.parse(e.data)));
 es.onerror = () => ($('#status').textContent = 'Verbinding kwijt, opnieuw verbinden…');
 
 // ---------- timelapse: replay the recording with fading trails ----------

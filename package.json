@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "gtfs-realtime-bindings": "^1.1.1",
-    "unzipper": "^0.12.3"
+    "unzipper": "^0.12.3",
+    "zeromq": "^6.8.0"
   }
 }

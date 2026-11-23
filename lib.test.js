@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVehicles, chainWays, osmToRail, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
+import { buildVehicles, chainWays, osmToRail, parseKV6, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
 
 test('builds nearby vehicles with delay, next stop and destination; drops far and stale ones', () => {
   const now = 1_000_000;
@@ -99,6 +99,32 @@ test('vehicle model from RET fleet number', () => {
   assert.deepEqual(vehicleModel('RET', 'tram', '2027'), { model: 'Alstom Citadis 302', since: 2003 });
   assert.equal(vehicleModel('RET', 'bus', '1001'), null);
   assert.equal(vehicleModel('RET', 'metro', '9999'), null);
+});
+
+test('rdToWgs84: Amersfoort origin and the published Westertoren reference point', () => {
+  const o = rdToWgs84(155000, 463000);
+  assert.equal(o.lat.toFixed(6), '52.155174');
+  assert.equal(o.lon.toFixed(6), '5.387206');
+  const w = rdToWgs84(120700.723, 487525.501); // Westertoren, Amsterdam: 52.37453253 N, 4.88352559 E
+  assert.equal(w.lat.toFixed(6), '52.374533');
+  assert.equal(w.lon.toFixed(6), '4.883526');
+});
+
+test('parseKV6 reads prefixed and plain KV6 messages; -1 coordinates mean no position', () => {
+  const xml = `<tmi8:KV6posinfo><tmi8:ONROUTE><tmi8:dataownercode>RET</tmi8:dataownercode><tmi8:lineplanningnumber>M009</tmi8:lineplanningnumber>
+    <tmi8:operatingday>2026-11-23</tmi8:operatingday><tmi8:journeynumber>595959</tmi8:journeynumber><tmi8:userstopcode>HA0114</tmi8:userstopcode>
+    <tmi8:timestamp>2026-11-23T13:30:01.402+01:00</tmi8:timestamp><tmi8:vehiclenumber>5337</tmi8:vehiclenumber><tmi8:punctuality>48</tmi8:punctuality>
+    <tmi8:rd-x>155000</tmi8:rd-x><tmi8:rd-y>463000</tmi8:rd-y></tmi8:ONROUTE>
+    <DEPARTURE><dataownercode>QBUZZ</dataownercode><lineplanningnumber>g314</lineplanningnumber><operatingday>2026-11-23</operatingday>
+    <journeynumber>36</journeynumber><timestamp>2026-11-23T13:30:05+01:00</timestamp><punctuality>-20</punctuality><rd-x>-1</rd-x><rd-y>-1</rd-y></DEPARTURE></tmi8:KV6posinfo>`;
+  const [a, b] = parseKV6(xml);
+  assert.equal(a.type, 'ONROUTE');
+  assert.equal(a.id, '2026-11-23:RET:M009:595959');
+  assert.equal(a.ts, Date.parse('2026-11-23T12:30:01.402Z') / 1000);
+  assert.equal(a.lat.toFixed(4), '52.1552');
+  assert.equal(a.delay, 48);
+  assert.equal(a.vehicleNo, '5337');
+  assert.deepEqual([b.type, b.id, b.delay, b.lat], ['DEPARTURE', '2026-11-23:QBUZZ:g314:36', -20, undefined]);
 });
 
 test('helpers', () => {
