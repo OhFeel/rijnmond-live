@@ -21,7 +21,7 @@ const UA = { 'User-Agent': 'ov-live/1.0' };
 const DATA = process.env.DATA_DIR ? pathToFileURL(`${process.env.DATA_DIR.replace(/[\\/]$/, '')}/`) : new URL('./data/', import.meta.url);
 const MAX_CLIENTS = Number(process.env.MAX_CLIENTS) || 500; // live connections; each gets ~100 KB per feed update
 const ZIP = new URL('gtfs-nl.zip', DATA);
-const STATIC_CACHE = new URL('static-v8.json', DATA); // bump when the static format changes
+const STATIC_CACHE = new URL('static-v9.json', DATA); // bump when the static format changes
 const DAY = 24 * 3600e3;
 const { FeedMessage } = GtfsRealtimeBindings.transit_realtime;
 
@@ -29,6 +29,9 @@ let routes = new Map(), stops = new Map(), stations = [], timetable = {}, tripIn
 let snapshot = { vehicles: [], fetchedAt: 0 };
 let liveTrips = new Map(), lineKeys = new Set(), lastFixes = new Map(), recentVehicles = new Map();
 const clients = new Set();
+// Server time for the browsers (their clocks may be off; predictions depend on "now"). Defined up here:
+// a browser can connect while the timetable is still being built further down.
+const clockMsg = () => `event: clock\ndata: ${Date.now()}\n\n`;
 
 // Same number ≠ same line: RET tram 3 and HTM tram 3 differ. Keep in sync with keyOf in public/app.js.
 const lineKey = (x) => `${x.operator}|${x.mode}|${x.line}`;
@@ -46,12 +49,13 @@ function addFrame(f) {
 }
 
 async function loadHistory() {
+  // reset before any await: record() keeps adding frames while this runs (new day = fresh recording)
   history.date = serviceDate(0);
+  history.frames = [];
+  history.tripDelays = new Map();
   // recordings are ~60 MB/day: keep a week so a long-running server doesn't fill its disk
   const keep = new Set(Array.from({ length: 7 }, (_, i) => `history-${serviceDate(-i)}.jsonl`));
   for (const f of await fs.readdir(DATA).catch(() => [])) if (/^history-\d{8}\.jsonl$/.test(f) && !keep.has(f)) await fs.rm(new URL(f, DATA)).catch(() => {});
-  history.frames = [];
-  history.tripDelays = new Map();
   const text = await fs.readFile(historyFile(history.date), 'utf8').catch(() => '');
   for (const line of text.split('\n')) if (line) { try { addFrame(JSON.parse(line)); } catch {} } // skip a torn last line
 }
@@ -159,7 +163,9 @@ async function buildStatic() {
   for (const st of stationList) {
     const rs = [...(served.get(st.id) ?? [])].map((id) => r[id]).filter(Boolean);
     st.modes = [...new Set(rs.map((x) => modeOf(x.type)))];
-    st.lines = [...new Set(rs.map((x) => x.short))].sort((a, b) => a.localeCompare(b, 'nl', { numeric: true }));
+    // full line keys, not just "3": bus 3 and tram 3 at one station are different lines with different colours
+    st.lines = [...new Set(rs.map((x) => lineKey({ operator: x.agency, mode: modeOf(x.type), line: x.short })))]
+      .sort((a, b) => a.split('|')[2].localeCompare(b.split('|')[2], 'nl', { numeric: true }));
     if (st.modes.length) st.metro = st.modes.includes('metro');
   }
 
@@ -441,9 +447,10 @@ async function poll(name) {
 }
 
 // ---------- http ----------
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
-http.createServer(async (req, res) => {
+const handle = async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -483,7 +490,13 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[file.slice(file.lastIndexOf('.'))] ?? 'application/octet-stream', 'Cache-Control': 'no-cache' });
     res.end(body);
   } catch { res.writeHead(404); res.end(); }
-}).listen(PORT, () => console.log(`http://localhost:${PORT}`));
+};
+// an error in one request must answer 500, not take the whole server down
+http.createServer((req, res) => handle(req, res).catch((e) => {
+  console.error('Verzoek mislukt:', req.url, e);
+  if (!res.headersSent) res.writeHead(500);
+  res.end();
+})).listen(PORT, () => console.log(`http://localhost:${PORT}`));
 
 await fs.mkdir(DATA, { recursive: true });
 await loadHistory();
@@ -497,8 +510,5 @@ listenKv6(); // runs forever, reconnects itself
 await loadStatic().catch((e) => console.error('Dienstregeling mislukt:', e.message));
 rebuild();
 setInterval(() => loadStatic().catch((e) => console.error('Dienstregeling verversen mislukt:', e.message)), 20 * 60e3); // cheap when cached
-// SSE keep-alive so proxies don't drop idle streams
-// Server time for the browsers (their clocks may be off; predictions depend on "now"). Doubles as the
-// SSE keep-alive so proxies don't drop idle streams. Run the server with NTP (Linux default).
-const clockMsg = () => `event: clock\ndata: ${Date.now()}\n\n`;
+// Clock every 15 s; doubles as the SSE keep-alive so proxies don't drop idle streams. Run with NTP (Linux default).
 setInterval(() => { const msg = clockMsg(); for (const res of clients) res.write(msg); }, 15_000);

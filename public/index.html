@@ -7,15 +7,23 @@
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
   <title>Rijnmond Live</title>
   <meta name="description" content="Live kaart van metro, tram en bus in de regio Rotterdam, met vertragingen, vertrektijden en stiptheid. Onofficieel.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='9' y='3' width='14' height='26' rx='6' fill='%23e2231a'/%3E%3Crect x='11' y='6' width='10' height='5' rx='2' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <!-- installable: "Zet op beginscherm" opens it full screen with its own icon (iPhone + Android) -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Rijnmond Live">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="map" role="application" aria-label="Kaart met lijnen, haltes en voertuigen"></div>
 
-  <aside class="panel" aria-label="Rijnmond Live">
+  <aside class="panel" id="panel" aria-label="Rijnmond Live">
     <header>
+      <button class="grabber" id="grabber" aria-expanded="false" aria-controls="panel" aria-label="Paneel uitklappen"></button>
       <h1>Rijnmond Live</h1>
       <p id="status" class="sub" aria-live="polite">Verbinden…</p>
       <div class="segmented tabs" role="tablist" aria-label="Weergave">
@@ -44,6 +52,10 @@
     </div>
 
     <section id="view-live" class="view" role="tabpanel">
+      <div id="nearby" hidden>
+        <h2>Bij jou in de buurt <button id="nearbyClose" class="link">Sluiten</button></h2>
+        <div id="nearbyList" aria-live="polite"></div>
+      </div>
       <h2 id="listTitle">In beeld</h2>
       <ul id="list"></ul>
     </section>

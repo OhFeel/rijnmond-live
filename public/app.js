@@ -34,7 +34,7 @@ map.once('style.load', () => {
   map.setPadding(padding());
   map.fitBounds([[4.3, 51.84], [4.66, 51.99]], { padding: 0, duration: 0 }); // Rijnmond
 });
-addEventListener('resize', () => map.setPadding(padding()));
+addEventListener('resize', () => { setSheet(sheetOpen()); map.setPadding(padding()); });
 
 // ---------- helpers ----------
 function status(d) {
@@ -46,16 +46,42 @@ function status(d) {
 }
 const badge = (x, cls = '') => `<span class="badge ${cls}" style="--c:${x.color}">${esc(x.line)}</span>`;
 const title = (v) => (v.destination ? `Richting ${v.destination}` : v.name && !/^lijn$/i.test(v.name) ? v.name : `${MODE_NAME[v.mode] ?? ''} ${v.line}`);
-const liveKeys = () => new Set(vehicles.map(keyOf));
+let liveSet = new Set(); // lines with a vehicle running; rebuilt per snapshot, not per vehicle per frame
+const liveKeys = () => liveSet;
 const modeOk = (x) => state.mode === 'all' || x.mode === state.mode;
 function lineVisible(x) {
   if (!modeOk(x)) return false;
   if (state.selected.size) return state.selected.has(keyOf(x));
   return !state.onlyLive || liveKeys().has(keyOf(x));
 }
-const padding = () => (innerWidth > 700
+const phone = () => innerWidth <= 700;
+const padding = () => (!phone()
   ? { left: $('.panel').offsetWidth + 24, top: 20, right: 20, bottom: 20 }
-  : { left: 20, top: 20, right: 20, bottom: $('.panel').offsetHeight + 20 });
+  : { left: 20, top: 20, right: 20, bottom: sheetCollapsed() + 20 }); // centre above the collapsed sheet
+
+// ---------- phone bottom sheet: collapsed = title + status, open = 88% of the screen ----------
+const sheetCollapsed = () => {
+  const p = $('.panel'), top = p.getBoundingClientRect().top - p.scrollTop;
+  return Math.round($('#status').getBoundingClientRect().bottom - top + 10); // just above the tabs (12 px below)
+};
+function setSheet(open) {
+  if (!phone()) { document.documentElement.style.removeProperty('--sheet'); return; }
+  document.body.classList.toggle('sheet-open', open);
+  if (!open) $('.panel').scrollTop = 0;
+  document.documentElement.style.setProperty('--sheet', `${open ? Math.round(innerHeight * 0.88) : sheetCollapsed()}px`);
+  $('#grabber').setAttribute('aria-expanded', open);
+  $('#grabber').setAttribute('aria-label', open ? 'Paneel inklappen' : 'Paneel uitklappen');
+}
+const sheetOpen = () => document.body.classList.contains('sheet-open');
+$('#grabber').addEventListener('click', () => setSheet(!sheetOpen()));
+let touchY = null; // swipe the sheet's header up or down
+$('.panel header').addEventListener('touchstart', (e) => (touchY = e.touches[0].clientY), { passive: true });
+$('.panel header').addEventListener('touchend', (e) => {
+  const dy = e.changedTouches[0].clientY - (touchY ?? e.changedTouches[0].clientY);
+  if (dy < -30) setSheet(true); else if (dy > 30) setSheet(false);
+  touchY = null;
+});
+setSheet(false);
 
 // ---------- vehicle sprites: top-down vehicles, front pointing north, rotated by the map ----------
 // Drawn on a canvas at 2× so they stay crisp; one image per mode + line colour, made on demand.
@@ -357,22 +383,29 @@ function openVehicle(id, fly) {
   showPopup(f.pos, vehiclePopup(f.v), `veh:${id}`);
 }
 
-async function openStation(p) {
-  const st = stations.find((s) => s.id === p.id);
-  showPopup([st.lon, st.lat], `<div class="pop"><h3>${esc(st.name)}</h3><p class="sub">Vertrektijden laden…</p></div>`, `st:${st.id}`);
-  const deps = await fetch(`/api/station/${st.id}`).then((r) => r.json()).catch(() => null);
-  if (openPopup?.ref !== `st:${st.id}`) return;
+// departures of a station (no arrivals at their own terminus), as list rows; shared by popup and "nearby"
+const stationDeps = (st) => fetch(`/api/station/${st.id}`).then((r) => r.json()).catch(() => null);
+function depRows(deps, st, max) {
   const now = nowMs() / 1000;
-  const shown = (deps ?? []).filter((d) => modeOk(d) && d.destination !== st.name).slice(0, 8);
-  const rows = shown.map((d) => {
+  const shown = (deps ?? []).filter((d) => modeOk(d) && d.destination !== st.name).slice(0, max);
+  return { shown, html: shown.map((d) => {
     const s = d.delaySec == null ? { cls: 's-unknown', text: 'gepland' } : status(d.delaySec);
     const min = Math.round((d.time - now) / 60);
     return `<li>${badge(d)}<span class="dest">${esc(d.destination ?? '')}</span>
       <span class="when"><b>${min <= 0 ? 'nu' : min < 30 ? `${min} min` : clock(d.time)}</b><small class="${s.cls}">${esc(s.text)}</small></span></li>`;
-  }).join('');
+  }).join('') };
+}
+
+async function openStation(p) {
+  const st = stations.find((s) => s.id === p.id);
+  showPopup([st.lon, st.lat], `<div class="pop"><h3>${esc(st.name)}</h3><p class="sub">Vertrektijden laden…</p></div>`, `st:${st.id}`);
+  const deps = await stationDeps(st);
+  if (openPopup?.ref !== `st:${st.id}`) return;
+  const { shown, html: rows } = depRows(deps, st, 8);
   const known = shown.filter((d) => d.delaySec != null);
   const onTime = known.filter((d) => d.delaySec >= -60 && d.delaySec <= 180).length;
-  const served = (st.lines ?? []).map((l) => lines.find((x) => x.line === l) ?? { line: l, color: '#6e6e73' });
+  // only lines drawn on the map (trains at Rotterdam Centraal aren't; their departures still show below)
+  const served = (st.lines ?? []).map((k) => lines.find((x) => keyOf(x) === k)).filter(Boolean);
   openPopup.setHTML(`<div class="pop"><h3>${esc(st.name)}</h3>
     ${served.length ? `<div class="served">${served.map((l) => badge(l, 'small')).join('')}</div>` : ''}
     ${known.length ? `<p class="sub stat">${onTime} van ${known.length} vertrekken met live info op tijd</p>` : ''}
@@ -452,6 +485,7 @@ function tick() {
 // ---------- live updates (server pushes as soon as OVapi has new data) ----------
 function onSnapshot(data) {
   vehicles = data.vehicles;
+  liveSet = new Set(vehicles.map(keyOf));
   fetchedAt = data.fetchedAt;
   stats = data.stats;
   const ids = new Set(vehicles.map((v) => v.id));
@@ -564,7 +598,7 @@ async function setView(view) {
 }
 
 // ---------- controls ----------
-$('.tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
+$('.tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { setSheet(true); setView(b.dataset.view); } });
 $('#filters .segmented').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
@@ -594,8 +628,11 @@ for (const [id, key] of [['#showLines', 'showLines'], ['#showStops', 'showStops'
 }
 $('#list').addEventListener('click', (e) => {
   const id = e.target.closest('button')?.dataset.id;
-  if (id) openVehicle(id, true);
+  if (!id) return;
+  setSheet(false); // on a phone: get the sheet out of the way so you see the vehicle
+  openVehicle(id, true);
 });
+$('#lineSearch').addEventListener('focus', () => setSheet(true));
 $('#tlPlay').addEventListener('click', () => setPlaying(!tl.playing));
 $('#tlSlider').addEventListener('input', (e) => { tl.t = +e.target.value; if (tl.tracks) drawTimelapse(); });
 $('#view-timelapse .segmented').addEventListener('click', (e) => {
@@ -606,14 +643,48 @@ $('#view-timelapse .segmented').addEventListener('click', (e) => {
 });
 $('#tlTrails').addEventListener('change', (e) => { tl.trails = e.target.checked; if (tl.tracks) drawTimelapse(); });
 
+// ---------- "Bij jou in de buurt": the nearest stops with their next departures, refreshed every 30 s ----------
+const metres = (a, b) => Math.hypot((a[0] - b[0]) * M_LON, (a[1] - b[1]) * M_LAT);
+let nearbyAt = null, nearbyTimer = null;
+async function showNearby(ll) {
+  nearbyAt = ll;
+  const near = stations.map((s) => ({ s, d: metres(ll, [s.lon, s.lat]) })).filter((x) => x.d <= 1000)
+    .sort((a, b) => a.d - b.d).slice(0, 3);
+  $('#nearby').hidden = false;
+  if (!near.length) { $('#nearbyList').innerHTML = '<p class="sub note">Geen haltes binnen 1 km.</p>'; return; }
+  const all = await Promise.all(near.map(({ s }) => stationDeps(s)));
+  if (nearbyAt !== ll) return; // closed or moved meanwhile
+  $('#nearbyList').innerHTML = near.map(({ s, d }, i) => {
+    const { html } = depRows(all[i], s, 3);
+    return `<div class="near"><button class="near-st" data-id="${esc(s.id)}"><b>${esc(s.name)}</b><span class="sub">${Math.round(d / 10) * 10} m</span></button>
+      ${html ? `<ul class="deps">${html}</ul>` : '<p class="sub note">Geen vertrekken in de komende 2 uur.</p>'}</div>`;
+  }).join('');
+}
+function closeNearby() { nearbyAt = null; clearInterval(nearbyTimer); $('#nearby').hidden = true; }
+$('#nearbyClose').addEventListener('click', closeNearby);
+$('#nearbyList').addEventListener('click', (e) => {
+  const id = e.target.closest('.near-st')?.dataset.id;
+  const st = id && stations.find((s) => s.id === id);
+  if (!st) return;
+  setSheet(false);
+  map.flyTo({ center: [st.lon, st.lat], zoom: Math.max(map.getZoom(), 16), duration: reduceMotion ? 0 : 900 });
+  openStation(st);
+});
+
 let me;
 $('#locate').addEventListener('click', () => {
-  navigator.geolocation?.getCurrentPosition(({ coords }) => {
+  if (!navigator.geolocation) { $('#status').textContent = 'Deze browser kan je locatie niet bepalen.'; return; }
+  navigator.geolocation.getCurrentPosition(({ coords }) => {
     const ll = [coords.longitude, coords.latitude];
     if (!me) { const el = document.createElement('div'); el.className = 'me'; me = new maplibregl.Marker({ element: el }).setLngLat(ll).addTo(map); }
     me.setLngLat(ll);
     map.flyTo({ center: ll, zoom: 15 });
-  }, () => ($('#status').textContent = 'Locatie niet beschikbaar: sta locatietoegang toe in je browser.'));
+    if (state.view !== 'live') setView('live');
+    setSheet(true);
+    clearInterval(nearbyTimer);
+    showNearby(ll).then(() => $('#nearby').scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' }));
+    nearbyTimer = setInterval(() => nearbyAt && showNearby(nearbyAt), 30_000);
+  }, () => ($('#status').textContent = 'Locatie niet beschikbaar: sta locatietoegang toe in je browser.'), { enableHighAccuracy: true, timeout: 10_000 });
 });
 
 map.once('style.load', loadStatic); // style parsed; no need to wait for every tile

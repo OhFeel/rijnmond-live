@@ -92,6 +92,11 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
 
 .credit { flex: none; padding: 8px 20px 12px; border-top: 0.5px solid var(--separator); font-size: 12px; line-height: 1.4; color: var(--text-2); }
 .credit a { color: inherit; }
+.near { margin: 0 20px 12px; padding: 8px 12px; border-radius: 12px; background: var(--fill); }
+.near-st { display: flex; justify-content: space-between; align-items: baseline; width: 100%; min-height: 36px; padding: 0;
+  border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.near .deps { max-height: none; }
+.near .note { margin: 4px 0; }
 .view { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
 .tabs { margin: 12px 0 0; }
 .note { margin: 0 20px 10px; font-size: 13px; }
@@ -171,9 +176,25 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
   box-shadow: 0 0 0 6px rgba(10,132,255,.25); }
 
 /* Phone: panel becomes a bottom sheet, map keeps the top half */
+.grabber { display: none; }
+
+/* Phone: the panel is a bottom sheet. Collapsed it shows title + status (the map gets the screen);
+   tap or swipe up and the whole sheet opens and scrolls as one page. --sheet is set from app.js. */
 @media (max-width: 700px) {
-  .panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; height: 50vh;
-    border-radius: 22px 22px 0 0; padding-bottom: env(safe-area-inset-bottom); }
-  .fab { bottom: calc(50vh + 16px); }
-  .chips { max-height: 76px; }
+  .panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; height: var(--sheet, 120px); display: block;
+    border-radius: 22px 22px 0 0; overflow-y: auto; overscroll-behavior: contain;
+    padding-bottom: env(safe-area-inset-bottom); transition: height .25s ease; }
+  body:not(.sheet-open) .panel { overflow: hidden; }
+  /* sticky header must be opaque, or the chips scrolling underneath show through */
+  .panel header { padding-top: 0; padding-bottom: 8px; position: sticky; top: 0; z-index: 1; background: var(--solid); }
+  #nearby { scroll-margin-top: 170px; } /* land below the sticky header */
+  .grabber { display: block; width: 100%; height: 44px; margin: 0 0 -14px; border: 0; background: none; cursor: pointer; } /* 44 px tap area, small pill */
+  .grabber::before { content: ""; display: block; width: 40px; height: 5px; margin: 0 auto; border-radius: 3px; background: var(--text-2); opacity: .5; }
+  .view, #list { overflow: visible; }
+  .fab { bottom: calc(var(--sheet, 120px) + 16px); transition: bottom .25s ease; }
+  /* finger-sized targets: 44 px (Apple HIG / Material minimum) */
+  .segmented button, .switch, #list button, .link, .near-st { min-height: 44px; }
+  .chip { padding: 9px 3px; }
+  .chips { max-height: none; }
 }
+@media (max-width: 700px) and (prefers-reduced-motion: reduce) { .panel, .fab { transition: none; } }

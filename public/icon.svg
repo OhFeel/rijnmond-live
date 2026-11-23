@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- full-bleed background + content inside the central 80% so Android's maskable crop never cuts it -->
+  <rect width="512" height="512" fill="#e2231a"/>
+  <rect x="156" y="104" width="200" height="252" rx="64" fill="#fff"/>
+  <rect x="186" y="150" width="60" height="84" rx="12" fill="#e2231a"/>
+  <rect x="266" y="150" width="60" height="84" rx="12" fill="#e2231a"/>
+  <circle cx="200" cy="300" r="16" fill="#e2231a"/>
+  <circle cx="312" cy="300" r="16" fill="#e2231a"/>
+  <path d="M200 372 168 420M312 372l32 48" stroke="#fff" stroke-width="22" stroke-linecap="round"/>
+</svg>
