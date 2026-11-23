@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <title>Rijnmond Live</title>
+  <meta name="description" content="Live kaart van metro, tram en bus in de regio Rotterdam, met vertragingen, vertrektijden en stiptheid. Onofficieel.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='9' y='3' width='14' height='26' rx='6' fill='%23e2231a'/%3E%3Crect x='11' y='6' width='10' height='5' rx='2' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map" role="application" aria-label="Kaart met lijnen, haltes en voertuigen"></div>
+
+  <aside class="panel" aria-label="Rijnmond Live">
+    <header>
+      <h1>Rijnmond Live</h1>
+      <p id="status" class="sub" aria-live="polite">Verbinden…</p>
+      <div class="segmented tabs" role="tablist" aria-label="Weergave">
+        <button role="tab" aria-selected="true" aria-controls="view-live" data-view="live">Live</button>
+        <button role="tab" aria-selected="false" aria-controls="view-timelapse" data-view="timelapse">Timelapse</button>
+        <button role="tab" aria-selected="false" aria-controls="view-stats" data-view="stats">Stiptheid</button>
+      </div>
+    </header>
+
+    <!-- filters apply to live and timelapse -->
+    <div id="filters">
+      <div class="segmented" role="radiogroup" aria-label="Vervoerstype">
+        <button role="radio" aria-checked="true" data-mode="all">Alles</button>
+        <button role="radio" aria-checked="false" data-mode="bus">Bus</button>
+        <button role="radio" aria-checked="false" data-mode="metro">Metro</button>
+        <button role="radio" aria-checked="false" data-mode="tram">Tram</button>
+      </div>
+      <div class="switches">
+        <label class="switch"><input type="checkbox" id="showLines" checked><span>Routes</span></label>
+        <label class="switch"><input type="checkbox" id="showStops" checked><span>Haltes</span></label>
+        <label class="switch"><input type="checkbox" id="onlyLive"><span>Alleen rijdend</span></label>
+      </div>
+      <h2 id="linesTitle">Lijnen <button id="clearLines" class="link" hidden>Alles tonen</button></h2>
+      <input id="lineSearch" class="search" type="search" placeholder="Zoek lijn, bestemming of vervoerder" aria-label="Zoek lijn" autocomplete="off">
+      <div id="chips" class="chips" role="group" aria-labelledby="linesTitle"></div>
+    </div>
+
+    <section id="view-live" class="view" role="tabpanel">
+      <h2 id="listTitle">In beeld</h2>
+      <ul id="list"></ul>
+    </section>
+
+    <section id="view-timelapse" class="view" role="tabpanel" hidden>
+      <h2>Timelapse van vandaag</h2>
+      <div class="tl">
+        <div class="tl-row">
+          <button id="tlPlay" class="play" aria-label="Afspelen">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path id="tlIcon" fill="currentColor" d="M7 4.5v15l13-7.5z"/></svg>
+          </button>
+          <div class="tl-time"><b id="tlClock">--:--</b><span id="tlRange" class="sub"></span></div>
+        </div>
+        <input id="tlSlider" type="range" min="0" max="1" step="1" value="0" aria-label="Tijdstip in de opname">
+        <div class="segmented" role="radiogroup" aria-label="Snelheid">
+          <button role="radio" aria-checked="false" data-speed="60">60×</button>
+          <button role="radio" aria-checked="true" data-speed="300">300×</button>
+          <button role="radio" aria-checked="false" data-speed="1200">1200×</button>
+        </div>
+        <label class="switch"><input type="checkbox" id="tlTrails" checked><span>Sporen</span></label>
+        <p class="sub note">De server neemt elke minuut alle posities op. Hoe langer hij draait, hoe langer de timelapse.</p>
+      </div>
+    </section>
+
+    <section id="view-stats" class="view" role="tabpanel" hidden>
+      <h2>Stiptheid vandaag</h2>
+      <p id="statsNote" class="sub note"></p>
+      <ul id="stats"></ul>
+    </section>
+    <footer class="credit">
+      Onofficieel project, niet van RET of andere vervoerders. Posities ±1 min vertraagd.
+      Data: <a href="https://ovapi.nl" rel="noopener" target="_blank">OVapi</a>,
+      <a href="https://www.openstreetmap.org/copyright" rel="noopener" target="_blank">OpenStreetMap</a>,
+      <a href="https://openfreemap.org" rel="noopener" target="_blank">OpenFreeMap</a>.
+    </footer>
+  </aside>
+
+  <button id="locate" class="fab" aria-label="Toon mijn locatie">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M21 3 3 10.5l7.2 2.3L12.5 20z"/></svg>
+  </button>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
