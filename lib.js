@@ -51,6 +51,14 @@ export function parseKV6(xml) {
   return out;
 }
 
+// Is moving from fix a to fix b physically possible? Faster than 40 m/s (144 km/h) within a minute is a GPS
+// glitch or another vehicle reporting the same trip; after a minute without fixes anything goes (it may
+// really have been somewhere else, and we must not get stuck on a wrong position).
+export function plausibleMove(a, b, maxSpeed = 40) {
+  if (!a || !(b.ts > a.ts) || b.ts - a.ts >= 60) return true;
+  return distKm(a, b) * 1000 / (b.ts - a.ts) <= maxSpeed;
+}
+
 // Overpass result (route relations + their ways with geometry) → corridors: stretches of track
 // used by the same set of lines, e.g. { lines: ['metro|A', 'metro|B', 'metro|C'], coords }.
 // Drawing each corridor once per line, offset side by side, gives the metro-map look on shared track.
@@ -190,7 +198,8 @@ const inArea = (pos) => distKm(AREA, pos) <= AREA.radiusKm;
 // keep(pos, route): which vehicles to show; the server passes "in the area, or on a line we draw".
 // headsignOf(tripId): destination from the timetable. Live updates often hold only a few stops,
 // so their last stop is not the destination.
-export function buildVehicles(vpFeed, trips, routes, stops, now = Date.now() / 1000, keep = inArea, headsignOf = () => null) {
+// maxAge: drop vehicles whose fix is older (s); the server passes Infinity and filters after merging KV6.
+export function buildVehicles(vpFeed, trips, routes, stops, now = Date.now() / 1000, keep = inArea, headsignOf = () => null, maxAge = 300) {
   const out = [];
   for (const e of vpFeed?.entity ?? []) {
     const v = e.vehicle;
@@ -198,7 +207,7 @@ export function buildVehicles(vpFeed, trips, routes, stops, now = Date.now() / 1
     if (!p) continue;
     const pos = { lat: p.latitude, lon: p.longitude };
     const ts = num(v.timestamp) ?? now;
-    if (now - ts > 300) continue; // stale: vehicle stopped reporting >5 min ago
+    if (now - ts > maxAge) continue; // stale: vehicle stopped reporting
 
     const tu = trips.get(v.trip?.tripId);
     const route = routeInfo(routes, v.trip?.routeId ?? tu?.routeId);

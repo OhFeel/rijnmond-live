@@ -10,7 +10,7 @@ import unzipper from 'unzipper';
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import { Subscriber } from 'zeromq';
 import {
-  AREA, buildVehicles, stationDepartures, indexTripUpdates, parseCsvLine, parseKV6,
+  AREA, buildVehicles, stationDepartures, indexTripUpdates, parseCsvLine, parseKV6, plausibleMove,
   groupStations, thin, modeOf, lineColor, distKm, gtfsSecs, polylineKm, punctuality, osmToRail, cleanStopName,
 } from './lib.js';
 
@@ -27,7 +27,7 @@ const { FeedMessage } = GtfsRealtimeBindings.transit_realtime;
 
 let routes = new Map(), stops = new Map(), stations = [], timetable = {}, tripInfo = {}, staticGz = null;
 let snapshot = { vehicles: [], fetchedAt: 0 };
-let liveTrips = new Map(), lineKeys = new Set(), lastFixes = new Map();
+let liveTrips = new Map(), lineKeys = new Set(), lastFixes = new Map(), recentVehicles = new Map();
 const clients = new Set();
 
 // Same number ≠ same line: RET tram 3 and HTM tram 3 differ. Keep in sync with keyOf in public/app.js.
@@ -320,8 +320,16 @@ function rebuild() {
   // every vehicle on a line we draw, wherever it is on that line, plus anything else in the area
   const keep = (pos, r) => lineKeys.has(lineKey(r)) || distKm(AREA, pos) <= AREA.radiusKm;
   const headsignOf = (id) => (tripInfo[id]?.headsign ? cleanStopName(tripInfo[id].headsign) : null);
-  const vehicles = buildVehicles(vp, liveTrips, routes, stops, Date.now() / 1000, keep, headsignOf);
-  for (const v of vehicles) applyKv6(v, kv6.get(v.id)); // the live stream is newer than OVapi's minute feed
+  const now = Date.now() / 1000;
+  const built = buildVehicles(vp, liveTrips, routes, stops, now, keep, headsignOf, Infinity);
+  // OVapi sometimes leaves a vehicle out for a minute; it then "teleported" back kilometres further.
+  // Keep recently seen vehicles (unless KV6 said their trip ENDed) and let the live stream move them.
+  const ids = new Set(built.map((v) => v.id));
+  for (const [id, v] of recentVehicles) if (!ids.has(id) && !ended.has(id)) built.push(v);
+  for (const v of built) applyKv6(v, kv6.get(v.id)); // the live stream is newer than OVapi's minute feed
+  const vehicles = built.filter((v) => now - v.updatedAt <= 300) // stale after the merge, not before it
+    .sort((a, b) => String(a.line).localeCompare(String(b.line), 'nl', { numeric: true }));
+  recentVehicles = new Map(vehicles.map((v) => [v.id, v]));
   // previous GPS fix per vehicle, so a browser can estimate speed from its very first snapshot
   const fixes = new Map();
   for (const v of vehicles) {
@@ -348,23 +356,34 @@ const snapshotMsg = () => (lastMsg ??= `data: ${JSON.stringify(snapshot)}\n\n`);
 // ARRIVAL / DEPARTURE / ONROUTE per vehicle as it happens. Open best-effort feed, CC0 data, fair use:
 // one connection per consumer. https://govi.nu/realtime.html
 const KV6_ENVELOPES = ['RIG', 'QBUZZ', 'ARR', 'EBS', 'CXX', 'IVU'].map((op) => `/${op}/KV6posinfo`); // RIG = RET + HTM
-const kv6 = new Map(); // vehicle id → { lon, lat, ts, state, stateTs, delay }
+const kv6 = new Map(); // vehicle id → { lon, lat, ts, vehicleNo, state, stateTs, delay }
+const ended = new Map(); // id → END time: trip finished, don't keep the vehicle around
 const patches = new Map(); // id → latest state, flushed to browsers every second
 const STATE = { ARRIVAL: 'stop', ONSTOP: 'stop', INIT: 'stop', DEPARTURE: 'moving', ONROUTE: 'moving' };
 
 function applyKv6(v, k) {
   if (!k) return;
-  if (k.lon != null && k.ts > v.updatedAt) Object.assign(v, { lon: k.lon, lat: k.lat, updatedAt: k.ts });
+  // Once KV6 has a position, use only KV6: OVapi's position for the same moment differs by tens to
+  // hundreds of metres, and alternating sources made vehicles jump back and forth. OVapi only wins
+  // again when KV6 has been silent for 2 minutes.
+  if (k.lon != null && k.ts >= v.updatedAt - 120) Object.assign(v, { lon: k.lon, lat: k.lat, updatedAt: k.ts });
   if (k.delay != null) v.delaySec = k.delay;
   v.state = k.state ?? null;
   v.stateTs = k.stateTs ?? null;
 }
 
 function onKv6(ev) {
-  if (!ev.ts || ev.type === 'END') { kv6.delete(ev.id); return; }
+  if (!ev.ts) return;
+  if (ev.type === 'END') { kv6.delete(ev.id); ended.set(ev.id, ev.ts); return; }
   const k = kv6.get(ev.id) ?? {};
   if (k.stateTs && ev.ts < k.stateTs - 1) return; // late, out-of-order message
-  if (ev.lat != null && !(ev.ts < k.ts)) Object.assign(k, { lon: +ev.lon.toFixed(6), lat: +ev.lat.toFixed(6), ts: ev.ts });
+  if (ev.lat != null && !(ev.ts < k.ts)) {
+    // a second vehicle reporting the same trip (relief bus, coupled set): follow the first one
+    const otherVehicle = k.vehicleNo && ev.vehicleNo && ev.vehicleNo !== k.vehicleNo && ev.ts - k.ts < 120;
+    if (!otherVehicle && plausibleMove(k.lat != null ? k : null, ev)) {
+      Object.assign(k, { lon: +ev.lon.toFixed(6), lat: +ev.lat.toFixed(6), ts: ev.ts, vehicleNo: ev.vehicleNo ?? k.vehicleNo });
+    }
+  }
   if (STATE[ev.type]) Object.assign(k, { state: STATE[ev.type], stateTs: ev.ts });
   if (ev.delay != null) k.delay = ev.delay;
   kv6.set(ev.id, k);
@@ -401,7 +420,11 @@ setInterval(() => {
   const msg = `event: patch\ndata: ${JSON.stringify(rows)}\n\n`;
   for (const res of clients) res.write(msg);
 }, 1000);
-setInterval(() => { const old = Date.now() / 1000 - 1800; for (const [id, k] of kv6) if ((k.stateTs ?? k.ts) < old) kv6.delete(id); }, 60_000);
+setInterval(() => {
+  const old = Date.now() / 1000 - 1800;
+  for (const [id, k] of kv6) if ((k.stateTs ?? k.ts) < old) kv6.delete(id);
+  for (const [id, t] of ended) if (t < old) ended.delete(id);
+}, 60_000);
 
 // Timelapse downloads are big (a few MB gzipped): compress once per new frame and 10-minute window, not per request.
 let historyGz = { key: '', body: null };

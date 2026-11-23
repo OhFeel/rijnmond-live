@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVehicles, chainWays, osmToRail, parseKV6, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
+import { buildVehicles, chainWays, osmToRail, parseKV6, plausibleMove, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
 
 test('builds nearby vehicles with delay, next stop and destination; drops far and stale ones', () => {
   const now = 1_000_000;
@@ -125,6 +125,14 @@ test('parseKV6 reads prefixed and plain KV6 messages; -1 coordinates mean no pos
   assert.equal(a.delay, 48);
   assert.equal(a.vehicleNo, '5337');
   assert.deepEqual([b.type, b.id, b.delay, b.lat], ['DEPARTURE', '2026-11-23:QBUZZ:g314:36', -20, undefined]);
+});
+
+test('plausibleMove: rejects 10 km in 2 s, allows bus speeds and anything after a minute', () => {
+  const a = { lat: 52.0069, lon: 4.3570, ts: 1000 };
+  assert.equal(plausibleMove(a, { lat: 52.0611, lon: 4.4823, ts: 1002 }), false); // the EBS glitch: 10.5 km in 2 s
+  assert.equal(plausibleMove(a, { lat: 52.0069, lon: 4.3670, ts: 1030 }), true);  // ~690 m in 30 s = 83 km/h
+  assert.equal(plausibleMove(a, { lat: 52.0611, lon: 4.4823, ts: 1060 }), true);  // a minute later: accept
+  assert.equal(plausibleMove(null, a), true);
 });
 
 test('helpers', () => {

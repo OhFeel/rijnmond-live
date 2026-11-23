@@ -234,7 +234,7 @@ function upsertVehicle(v) {
   let f = fleet.get(v.id);
   if (!f) fleet.set(v.id, (f = { pos: [v.lon, v.lat], heading: v.bearing ?? 0, side: 0, speed: 0 }));
   f.v = v;
-  if (v.updatedAt === f.fixTs) return; // same fix, only status/delay changed
+  if (f.fixTs && v.updatedAt <= f.fixTs) return; // same or older fix (status/delay update, or out of order)
   const p = [v.lon, v.lat], loc = locate(v, p, f.g);
   if (!loc) { Object.assign(f, { g: null, target: p, fixTs: v.updatedAt }); return; } // off-route: glide to the fix
   // speed along the route from the previous fix (ours, or the server's on first sight)
@@ -287,7 +287,8 @@ function step(f, nowSec, dt, nowMs) {
   const sPred = Math.max(0, Math.min(len, f.sFix + f.speed * age));
   const diff = sPred - f.sDisp, dir = Math.sign(f.speed);
   // overshot (it stood at a stop): wait for the prediction instead of driving backwards
-  if (!(dir && diff * dir < 0 && Math.abs(diff) < HOLD_M)) f.sDisp += reduceMotion ? diff : diff * Math.min(1, dt * 2.5);
+  if (Math.abs(diff) > 1000) f.sDisp = sPred; // a big correction: place it, don't slide a kilometre across the map
+  else if (!(dir && diff * dir < 0 && Math.abs(diff) < HOLD_M)) f.sDisp += reduceMotion ? diff : diff * Math.min(1, dt * 2.5);
   const p = pointAt(f.g, f.sDisp);
   const fade = Math.max(0, 1 - (nowMs - f.offAt) / 3000); // GPS sits a few m beside the line: fade that in 3 s
   f.pos = [p[0] + f.off[0] * fade, p[1] + f.off[1] * fade];
