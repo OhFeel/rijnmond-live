@@ -434,7 +434,7 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/stream') {
     if (clients.size >= MAX_CLIENTS) { res.writeHead(503, { 'Retry-After': '60' }); return res.end(); }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    res.write(snapshotMsg());
+    res.write(clockMsg() + snapshotMsg()); // clock first, so the very first prediction is right
     clients.add(res);
     return req.on('close', () => clients.delete(res));
   }
@@ -475,4 +475,7 @@ await loadStatic().catch((e) => console.error('Dienstregeling mislukt:', e.messa
 rebuild();
 setInterval(() => loadStatic().catch((e) => console.error('Dienstregeling verversen mislukt:', e.message)), 20 * 60e3); // cheap when cached
 // SSE keep-alive so proxies don't drop idle streams
-setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 25_000);
+// Server time for the browsers (their clocks may be off; predictions depend on "now"). Doubles as the
+// SSE keep-alive so proxies don't drop idle streams. Run the server with NTP (Linux default).
+const clockMsg = () => `event: clock\ndata: ${Date.now()}\n\n`;
+setInterval(() => { const msg = clockMsg(); for (const res of clients) res.write(msg); }, 15_000);

@@ -2,11 +2,23 @@ const dark = matchMedia('(prefers-color-scheme: dark)').matches;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const clock = (t) => new Date(t * 1000).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
+const clock = (t) => new Date(t * 1000).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Amsterdam' });
 const keyOf = (x) => `${x.operator}|${x.mode}|${x.line}`; // same as lineKey in server.js
 const MODE_ORDER = { metro: 0, tram: 1, bus: 2, ferry: 3, train: 4 };
 const MODE_NAME = { metro: 'Metro', tram: 'Tram', bus: 'Bus', ferry: 'Veerboot', train: 'Trein' };
 const EMPTY = { type: 'FeatureCollection', features: [] };
+
+// Time from the server, not this device: a viewer's clock can be minutes off, and every prediction
+// counts from "now". Each clock message gives serverTime − localTime minus the network delay; the
+// largest of the recent samples has the least delay in it, so that one is the best estimate.
+const clockSamples = [];
+let clockOffset = 0;
+function onClock(serverMs) {
+  clockSamples.push(serverMs - Date.now());
+  if (clockSamples.length > 8) clockSamples.shift();
+  clockOffset = Math.max(...clockSamples);
+}
+const nowMs = () => Date.now() + clockOffset;
 
 const state = { view: 'live', mode: 'all', selected: new Set(), showLines: true, showStops: true, onlyLive: false, search: '' };
 let lines = [], stations = [], vehicles = [], fetchedAt = 0, stats = null;
@@ -303,7 +315,7 @@ function vehicleFeatures() {
 let lastDraw = 0, lastFrame = performance.now(), dirty = true;
 (function animate(now) {
   if (state.view !== 'timelapse') {
-    const dt = Math.min(1, (now - lastFrame) / 1000), nowSec = Date.now() / 1000; // shortcut: assumes the viewer's clock is right (±a few s)
+    const dt = Math.min(1, (now - lastFrame) / 1000), nowSec = nowMs() / 1000;
     for (const f of fleet.values()) step(f, nowSec, dt, now);
     dirty = fleet.size > 0;
     if (dirty && now - lastDraw > 33 && map.getSource('vehicles')) {
@@ -349,7 +361,7 @@ async function openStation(p) {
   showPopup([st.lon, st.lat], `<div class="pop"><h3>${esc(st.name)}</h3><p class="sub">Vertrektijden laden…</p></div>`, `st:${st.id}`);
   const deps = await fetch(`/api/station/${st.id}`).then((r) => r.json()).catch(() => null);
   if (openPopup?.ref !== `st:${st.id}`) return;
-  const now = Date.now() / 1000;
+  const now = nowMs() / 1000;
   const shown = (deps ?? []).filter((d) => modeOk(d) && d.destination !== st.name).slice(0, 8);
   const rows = shown.map((d) => {
     const s = d.delaySec == null ? { cls: 's-unknown', text: 'gepland' } : status(d.delaySec);
@@ -432,7 +444,7 @@ function renderStats() {
 function tick() {
   if (state.view === 'timelapse' || !fetchedAt) return;
   const n = vehicles.filter(lineVisible).length;
-  const ago = Math.max(0, Math.round((Date.now() - fetchedAt) / 1000));
+  const ago = Math.max(0, Math.round((nowMs() - fetchedAt) / 1000));
   $('#status').textContent = `${n} onderweg · ${ago < 10 ? 'zojuist' : ago < 120 ? `${ago} s geleden` : `${Math.round(ago / 60)} min geleden`} bijgewerkt`;
 }
 
@@ -455,6 +467,7 @@ function onSnapshot(data) {
 const es = new EventSource('/api/stream');
 es.onmessage = (e) => onSnapshot(JSON.parse(e.data));
 es.addEventListener('patch', (e) => applyPatch(JSON.parse(e.data)));
+es.addEventListener('clock', (e) => onClock(Number(e.data)));
 es.onerror = () => ($('#status').textContent = 'Verbinding kwijt, opnieuw verbinden…');
 
 // ---------- timelapse: replay the recording with fading trails ----------
@@ -464,7 +477,7 @@ const TL_HOURS = 6; // shortcut: replays the last 6 h only, to keep the download
 
 async function loadTimelapse() {
   $('#status').textContent = 'Opname laden…';
-  const since = Math.floor(Date.now() / 1000) - TL_HOURS * 3600;
+  const since = Math.floor(nowMs() / 1000) - TL_HOURS * 3600;
   const frames = await fetch(`/api/history?since=${since}`).then((r) => r.json()).catch(() => []);
   if (frames.length < 2) {
     $('#status').textContent = 'Nog te weinig opgenomen. Laat de server een tijdje draaien.';
