@@ -44,7 +44,7 @@ function status(d) {
   if (d < 0) return { cls: 's-early', text: `${min} min`, long: `${-min} min te vroeg` };
   return { cls: d >= 180 ? 's-verylate' : 's-late', text: `+${min} min`, long: `${min} min te laat` };
 }
-const badge = (x, cls = '') => `<span class="badge ${cls}" style="--c:${x.color}">${esc(x.line)}</span>`;
+const badge = (x, cls = '') => `<span class="badge ${cls}" style="--c:${x.color};--t:${x.text ?? '#fff'}">${esc(x.line)}</span>`;
 const title = (v) => (v.destination ? `Richting ${v.destination}` : v.name && !/^lijn$/i.test(v.name) ? v.name : `${MODE_NAME[v.mode] ?? ''} ${v.line}`);
 let liveSet = new Set(); // lines with a vehicle running; rebuilt per snapshot, not per vehicle per frame
 const liveKeys = () => liveSet;
@@ -169,7 +169,7 @@ async function loadStatic() {
 
   map.addSource('lines', { type: 'geojson', data: {
     type: 'FeatureCollection',
-    features: lines.map((l) => ({ type: 'Feature', properties: { key: keyOf(l), line: l.line, color: l.color, rail: l.mode === 'metro' || l.mode === 'tram', metro: l.mode === 'metro', lane: l.lane ?? 0 },
+    features: lines.map((l) => ({ type: 'Feature', properties: { key: keyOf(l), line: l.line, color: l.color, text: l.text, rail: l.mode === 'metro' || l.mode === 'tram', metro: l.mode === 'metro', lane: l.lane ?? 0 },
       geometry: { type: 'LineString', coordinates: l.coords } })),
   } });
   const W = { 9: [2.2, 0.8], 16: [8, 4.5] }; // line width at zoom: [metro, other]
@@ -185,7 +185,7 @@ async function loadStatic() {
   map.addLayer({ id: 'line-labels', type: 'symbol', source: 'lines', minzoom: 13,
     layout: { 'symbol-placement': 'line', 'symbol-spacing': 320, 'text-field': ['get', 'line'], 'text-size': 11,
       'text-font': ['Noto Sans Bold'], 'text-rotation-alignment': 'viewport', 'text-keep-upright': true },
-    paint: { 'text-color': '#fff', 'text-halo-color': ['get', 'color'], 'text-halo-width': 3 } });
+    paint: { 'text-color': ['get', 'text'], 'text-halo-color': ['get', 'color'], 'text-halo-width': 3 } });
 
   // timelapse layers (empty until used)
   map.addSource('tl-trails', { type: 'geojson', data: EMPTY });
@@ -215,7 +215,7 @@ async function loadStatic() {
   map.addLayer({ id: 'vehicle-labels', type: 'symbol', source: 'vehicles', minzoom: 12,
     layout: { 'text-field': ['concat', ['get', 'line'], ['case', ['!=', ['get', 'late'], ''], ['concat', ' ', ['get', 'late']], '']], 'text-size': 11, 'text-font': ['Noto Sans Bold'], 'text-variable-anchor': ['left', 'right', 'top', 'bottom'],
       'text-radial-offset': 1.3, 'text-padding': 1 },
-    paint: { 'text-color': '#fff', 'text-halo-color': ['get', 'color'], 'text-halo-width': 2.5 } });
+    paint: { 'text-color': ['get', 'text'], 'text-halo-color': ['get', 'color'], 'text-halo-width': 2.5 } });
 
   map.addLayer({ id: 'station-labels', type: 'symbol', source: 'stations',
     filter: ['any', ['all', ['get', 'metro'], ['>=', ['zoom'], 11.5]], ['>=', ['zoom'], 15.5]],
@@ -234,6 +234,8 @@ async function loadStatic() {
     else openStation(hit.properties);
   });
   applyFilters();
+  renderFavs();
+  applyHash(); // opened via a shared link
 }
 
 // ---------- live vehicles: show where a vehicle is NOW, not where its last GPS fix was ----------
@@ -296,6 +298,7 @@ function applyPatch(rows) {
       if (!newFix) { f.sFix = f.sDisp; f.fixTs = stTs; } // no position in the message: from where it stood
       f.speed = (f.cruise || 6) * (f.dirSign || Math.sign(f.speed) || 1);
     }
+    if (openPopup?.ref === `veh:${id}`) openPopup.setHTML(vehiclePopup(v)); // status/delay live, not once a minute
   }
   dirty = true;
 }
@@ -332,7 +335,7 @@ function vehicleFeatures() {
     if (!lineVisible(v)) continue;
     const late = v.delaySec != null && Math.abs(v.delaySec) >= 60 ? `${v.delaySec > 0 ? '+' : '−'}${Math.round(Math.abs(v.delaySec) / 60)}` : '';
     out.push({ type: 'Feature', geometry: { type: 'Point', coordinates: f.pos },
-      properties: { id, key: keyOf(v), line: v.line, color: v.color, img: spriteId(v.mode, v.color), bearing: f.heading,
+      properties: { id, key: keyOf(v), line: v.line, color: v.color, text: v.text ?? '#fff', img: spriteId(v.mode, v.color), bearing: f.heading,
         offset: [(f.side ?? 0) * LANE_PX, 0], late,
         sort: MODE_ORDER[v.mode] === 0 ? 2 : MODE_ORDER[v.mode] === 1 ? 1 : 0 } });
   }
@@ -348,6 +351,7 @@ let lastDraw = 0, lastFrame = performance.now(), dirty = true;
     if (dirty && now - lastDraw > 33 && map.getSource('vehicles')) {
       map.getSource('vehicles').setData({ type: 'FeatureCollection', features: vehicleFeatures() });
       if (openPopup?.ref?.startsWith('veh:')) { const f = fleet.get(openPopup.ref.slice(4)); if (f) openPopup.setLngLat(f.pos); }
+      if (followId) { const f = fleet.get(followId); if (f) map.setCenter(f.pos); else setFollow(null); } // trip ended: stop
       lastDraw = now;
       dirty = false;
     }
@@ -365,15 +369,45 @@ function vehiclePopup(v) {
     <dt>Voertuig</dt><dd>${esc(kind)}${v.model ? `<br><span class="sub">${esc(v.model)} · sinds ${v.since}</span>` : ''}</dd>
     ${v.name && !/^lijn$/i.test(v.name) ? `<dt>Lijn</dt><dd>${esc(v.name)}</dd>` : ''}
     ${v.operator ? `<dt>Vervoerder</dt><dd>${esc(v.operator)}</dd>` : ''}
-    <dt>Positie</dt><dd>${clock(v.updatedAt)}</dd></dl></div>`;
+    <dt>Positie</dt><dd>${clock(v.updatedAt)}</dd></dl>
+    ${nextStopsHtml(fleet.get(v.id))}
+    <button class="pop-btn follow" data-id="${esc(v.id)}" aria-pressed="${followId === v.id}">${followId === v.id ? 'Stop volgen' : 'Volg dit voertuig'}</button></div>`;
 }
+
+// ---------- follow a vehicle: the map keeps it centred, the popup lists its next stops ----------
+let followId = null, tripTimer = null;
+function nextStopsHtml(f) {
+  if (!f?.nextStops?.length) return '';
+  return `<h4>Komende haltes</h4><ul class="deps next-stops">${f.nextStops.map((s) =>
+    `<li><span class="dest">${esc(s.name)}</span><span class="when"><b>${clock(s.time)}</b>${s.time - s.planned >= 60 ? `<small class="s-late">+${Math.round((s.time - s.planned) / 60)}</small>` : ''}</span></li>`).join('')}</ul>`;
+}
+async function loadNextStops(id) {
+  const rows = await fetch(`/api/trip?id=${encodeURIComponent(id)}`).then((r) => r.json()).catch(() => []);
+  const f = fleet.get(id);
+  if (!f) return;
+  f.nextStops = rows;
+  if (openPopup?.ref === `veh:${id}`) openPopup.setHTML(vehiclePopup(f.v));
+}
+function setFollow(id) {
+  followId = id;
+  if (id) { setSheet(false); map.easeTo({ center: fleet.get(id).pos, zoom: Math.max(map.getZoom(), 15), duration: reduceMotion ? 0 : 600 }); }
+  const f = id && fleet.get(id);
+  if (openPopup?.ref?.startsWith('veh:')) openPopup.setHTML(vehiclePopup(fleet.get(openPopup.ref.slice(4)).v));
+  if (f) $('#status').textContent = `Je volgt ${MODE_NAME[f.v.mode] ?? ''} ${f.v.line}. Sleep de kaart om te stoppen.`;
+}
+map.on('dragstart', () => followId && setFollow(null)); // moving the map yourself ends following
 
 function showPopup(lngLat, html, ref) {
   openPopup?.remove();
   openPopup = new maplibregl.Popup({ closeButton: false, maxWidth: '320px', offset: 18, focusAfterOpen: false })
     .setLngLat(lngLat).setHTML(html).addTo(map);
   openPopup.ref = ref;
-  openPopup.on('close', () => { if (openPopup?.ref === ref) openPopup = null; });
+  openPopup.on('close', () => {
+    if (openPopup?.ref !== ref) return;
+    openPopup = null;
+    if (ref.startsWith('st:')) setHash(state.selected.size ? { lijn: [...state.selected].join(',') } : null);
+    if (ref.startsWith('veh:')) { clearInterval(tripTimer); if (followId) setFollow(null); }
+  });
 }
 
 function openVehicle(id, fly) {
@@ -381,32 +415,59 @@ function openVehicle(id, fly) {
   if (!f) return;
   if (fly) map.flyTo({ center: f.pos, zoom: Math.max(map.getZoom(), 15), duration: reduceMotion ? 0 : 900 });
   showPopup(f.pos, vehiclePopup(f.v), `veh:${id}`);
+  loadNextStops(id);
+  clearInterval(tripTimer);
+  tripTimer = setInterval(() => loadNextStops(id), 30_000); // stops pass by: keep the list current
 }
 
-// departures of a station (no arrivals at their own terminus), as list rows; shared by popup and "nearby"
+// departures of a station (no arrivals at their own terminus), as list rows; shared by popup, favourites, nearby
 const stationDeps = (st) => fetch(`/api/station/${st.id}`).then((r) => r.json()).catch(() => null);
 function depRows(deps, st, max) {
   const now = nowMs() / 1000;
   const shown = (deps ?? []).filter((d) => modeOk(d) && d.destination !== st.name).slice(0, max);
   return { shown, html: shown.map((d) => {
-    const s = d.delaySec == null ? { cls: 's-unknown', text: 'gepland' } : status(d.delaySec);
+    const s = d.cancelled ? { cls: 's-verylate', text: 'Vervalt' } : d.delaySec == null ? { cls: 's-unknown', text: 'gepland' } : status(d.delaySec);
     const min = Math.round((d.time - now) / 60);
-    return `<li>${badge(d)}<span class="dest">${esc(d.destination ?? '')}</span>
-      <span class="when"><b>${min <= 0 ? 'nu' : min < 30 ? `${min} min` : clock(d.time)}</b><small class="${s.cls}">${esc(s.text)}</small></span></li>`;
+    const why = typeof d.cancelled === 'string' ? ` title="${esc(d.cancelled)}"` : '';
+    return `<li${d.cancelled ? ' class="cancelled"' : ''}>${badge(d)}<span class="dest">${esc(d.destination ?? '')}</span>
+      <span class="when"${why}><b>${min <= 0 ? 'nu' : min < 30 ? `${min} min` : clock(d.time)}</b><small class="${s.cls}">${esc(s.text)}</small></span></li>`;
   }).join('') };
 }
 
+// Stable station key for favourites and links: station ids are renumbered when the timetable changes,
+// name + rounded position aren't. "Capelsebrug@51.921,4.558"
+const stationKey = (s) => `${s.name}@${s.lat.toFixed(3)},${s.lon.toFixed(3)}`;
+function findStation(key) {
+  const [name, pos] = String(key).split('@'), [lat, lon] = (pos ?? '').split(',').map(Number);
+  return stations.filter((s) => s.name === name)
+    .sort((a, b) => Math.hypot(a.lat - lat, a.lon - lon) - Math.hypot(b.lat - lat, b.lon - lon))[0] ?? null;
+}
+// localStorage can be missing or throw (private mode, blocked storage): favourites then just don't persist
+const store = {
+  get: (k, def) => { try { return JSON.parse(localStorage.getItem(k)) ?? def; } catch { return def; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+let favs = store.get('rl-favs', []);
+
+const stationHead = (st) => {
+  const fav = favs.includes(stationKey(st));
+  return `<h3>${esc(st.name)}<span class="pop-actions">
+    <button class="icon-btn star" data-key="${esc(stationKey(st))}" aria-pressed="${fav}" aria-label="${fav ? 'Verwijder uit favorieten' : 'Zet bij favorieten'}">${fav ? '★' : '☆'}</button>
+    <button class="icon-btn share" data-halte="${esc(stationKey(st))}" aria-label="Deel deze halte">↗</button></span></h3>`;
+};
+
 async function openStation(p) {
   const st = stations.find((s) => s.id === p.id);
-  showPopup([st.lon, st.lat], `<div class="pop"><h3>${esc(st.name)}</h3><p class="sub">Vertrektijden laden…</p></div>`, `st:${st.id}`);
+  setHash({ halte: stationKey(st) });
+  showPopup([st.lon, st.lat], `<div class="pop">${stationHead(st)}<p class="sub">Vertrektijden laden…</p></div>`, `st:${st.id}`);
   const deps = await stationDeps(st);
   if (openPopup?.ref !== `st:${st.id}`) return;
   const { shown, html: rows } = depRows(deps, st, 8);
-  const known = shown.filter((d) => d.delaySec != null);
+  const known = shown.filter((d) => d.delaySec != null && !d.cancelled);
   const onTime = known.filter((d) => d.delaySec >= -60 && d.delaySec <= 180).length;
   // only lines drawn on the map (trains at Rotterdam Centraal aren't; their departures still show below)
   const served = (st.lines ?? []).map((k) => lines.find((x) => keyOf(x) === k)).filter(Boolean);
-  openPopup.setHTML(`<div class="pop"><h3>${esc(st.name)}</h3>
+  openPopup.setHTML(`<div class="pop">${stationHead(st)}
     ${served.length ? `<div class="served">${served.map((l) => badge(l, 'small')).join('')}</div>` : ''}
     ${known.length ? `<p class="sub stat">${onTime} van ${known.length} vertrekken met live info op tijd</p>` : ''}
     ${rows ? `<ul class="deps">${rows}</ul>`
@@ -445,7 +506,7 @@ function renderChips() {
       aria-label="${MODE_NAME[l.mode] ?? l.mode} ${esc(l.line)} (${esc(l.operator)}), ${n} onderweg${l.name ? `, ${esc(l.name)}` : ''}"
       title="${esc(l.operator)} · ${esc(l.name)} · ${n} onderweg">${badge(l)}</button>`;
   }).join('') || '<p class="sub note">Geen lijn gevonden.</p>';
-  $('#clearLines').hidden = !state.selected.size;
+  $('#clearLines').hidden = $('#shareLines').hidden = !state.selected.size;
 }
 
 // Only vehicles in view: the region has hundreds, a list of all of them helps nobody.
@@ -473,6 +534,14 @@ function renderStats() {
       <span class="on" style="width:${o.onTimePct}%"></span><span class="late" style="width:${o.latePct}%"></span></div>
     <div class="sub">${o.trips} ritten · ${o.latePct}% >3 min te laat · gem. ${o.avgDelayMin > 0 ? '+' : ''}${String(o.avgDelayMin).replace('.', ',')} min</div>
   </li>`).join('') : '<li class="empty">Nog geen metingen. Even wachten op de eerste posities.</li>';
+  const lineOf = (k) => lines.find((l) => keyOf(l) === k) ?? { line: k.split('|')[2], color: '#6e6e73' };
+  $('#statsLines').innerHTML = (stats.lines ?? []).map((l) => `<li>${badge(lineOf(l.key))}
+    <span class="meta"><span class="dest">${l.onTimePct}% op tijd</span><span class="op">${esc(lineOf(l.key).operator ?? '')} · ${l.trips} ritten · gem. ${l.avgDelayMin > 0 ? '+' : ''}${String(l.avgDelayMin).replace('.', ',')} min</span></span></li>`).join('')
+    || '<li class="empty">Nog te weinig ritten gemeten (minstens 5 per lijn).</li>';
+  $('#cancelList').innerHTML = (stats.cancelled ?? []).map((c) => `<li>${badge(c)}
+    <span class="meta"><span class="dest">${esc(c.destination)}</span><span class="op">${esc([c.from && `vanaf ${c.from}`, c.reason].filter(Boolean).join(' · '))}</span></span>
+    <span class="when"><b class="struck">${clock(c.time)}</b><small class="s-verylate">Vervalt</small></span></li>`).join('')
+    || '<li class="empty">Geen uitgevallen ritten gemeld.</li>';
 }
 
 function tick() {
@@ -613,16 +682,20 @@ $('#chips').addEventListener('click', (e) => {
   if (!k) return;
   state.selected.has(k) ? state.selected.delete(k) : state.selected.add(k);
   applyFilters();
-  // zoom to the whole chosen line(s): every vehicle on it is on the map, wherever it is
-  const sel = lines.filter((l) => state.selected.has(keyOf(l)));
-  if (sel.length) {
-    const b = new maplibregl.LngLatBounds();
-    for (const l of sel) for (const c of l.coords) b.extend(c);
-    openPopup?.remove();
-    map.fitBounds(b, { padding: 40, maxZoom: 15, duration: reduceMotion ? 0 : 800 });
-  }
+  openPopup?.remove();
+  setHash(state.selected.size ? { lijn: [...state.selected].join(',') } : null);
+  fitSelected();
 });
-$('#clearLines').addEventListener('click', () => { state.selected.clear(); applyFilters(); });
+// zoom to the whole chosen line(s): every vehicle on it is on the map, wherever it is
+function fitSelected() {
+  const sel = lines.filter((l) => state.selected.has(keyOf(l)));
+  if (!sel.length) return;
+  const b = new maplibregl.LngLatBounds();
+  for (const l of sel) for (const c of l.coords) b.extend(c);
+  map.fitBounds(b, { padding: 40, maxZoom: 15, duration: reduceMotion ? 0 : 800 });
+}
+$('#clearLines').addEventListener('click', () => { state.selected.clear(); setHash(null); applyFilters(); });
+$('#shareLines').addEventListener('click', () => share({ lijn: [...state.selected].join(',') }, 'Rijnmond Live'));
 for (const [id, key] of [['#showLines', 'showLines'], ['#showStops', 'showStops'], ['#onlyLive', 'onlyLive']]) {
   $(id).addEventListener('change', (e) => { state[key] = e.target.checked; applyFilters(); });
 }
@@ -646,30 +719,81 @@ $('#tlTrails').addEventListener('change', (e) => { tl.trails = e.target.checked;
 // ---------- "Bij jou in de buurt": the nearest stops with their next departures, refreshed every 30 s ----------
 const metres = (a, b) => Math.hypot((a[0] - b[0]) * M_LON, (a[1] - b[1]) * M_LAT);
 let nearbyAt = null, nearbyTimer = null;
+// station cards with their next 3 departures; items: [{ s: station, sub: "330 m" }]
+async function stopCards(items) {
+  const all = await Promise.all(items.map(({ s }) => stationDeps(s)));
+  return items.map(({ s, sub }, i) => {
+    const { html } = depRows(all[i], s, 3);
+    return `<div class="near"><button class="near-st" data-id="${esc(s.id)}"><b>${esc(s.name)}</b><span class="sub">${esc(sub ?? '')}</span></button>
+      ${html ? `<ul class="deps">${html}</ul>` : '<p class="sub note">Geen vertrekken in de komende 2 uur.</p>'}</div>`;
+  }).join('');
+}
 async function showNearby(ll) {
   nearbyAt = ll;
   const near = stations.map((s) => ({ s, d: metres(ll, [s.lon, s.lat]) })).filter((x) => x.d <= 1000)
     .sort((a, b) => a.d - b.d).slice(0, 3);
   $('#nearby').hidden = false;
   if (!near.length) { $('#nearbyList').innerHTML = '<p class="sub note">Geen haltes binnen 1 km.</p>'; return; }
-  const all = await Promise.all(near.map(({ s }) => stationDeps(s)));
-  if (nearbyAt !== ll) return; // closed or moved meanwhile
-  $('#nearbyList').innerHTML = near.map(({ s, d }, i) => {
-    const { html } = depRows(all[i], s, 3);
-    return `<div class="near"><button class="near-st" data-id="${esc(s.id)}"><b>${esc(s.name)}</b><span class="sub">${Math.round(d / 10) * 10} m</span></button>
-      ${html ? `<ul class="deps">${html}</ul>` : '<p class="sub note">Geen vertrekken in de komende 2 uur.</p>'}</div>`;
-  }).join('');
+  const html = await stopCards(near.map(({ s, d }) => ({ s, sub: `${Math.round(d / 10) * 10} m` })));
+  if (nearbyAt === ll) $('#nearbyList').innerHTML = html; // unless closed or moved meanwhile
 }
 function closeNearby() { nearbyAt = null; clearInterval(nearbyTimer); $('#nearby').hidden = true; }
 $('#nearbyClose').addEventListener('click', closeNearby);
-$('#nearbyList').addEventListener('click', (e) => {
+
+// ---------- favourite stops: on top of the panel every time you open the app ----------
+async function renderFavs() {
+  const items = favs.map(findStation).filter(Boolean).map((s) => ({ s }));
+  $('#favs').hidden = !items.length;
+  if (items.length) $('#favList').innerHTML = await stopCards(items);
+}
+function toggleFav(key) {
+  favs = favs.includes(key) ? favs.filter((k) => k !== key) : [...favs, key];
+  store.set('rl-favs', favs);
+  renderFavs();
+}
+setInterval(() => favs.length && state.view === 'live' && renderFavs(), 30_000);
+
+// ---------- shareable links: #lijn=RET|metro|B or #halte=Capelsebrug@51.921,4.558 ----------
+function setHash(params) {
+  history.replaceState(null, '', params ? `#${new URLSearchParams(params)}` : location.pathname + location.search);
+}
+function applyHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  const keys = (h.get('lijn') ?? '').split(',').filter((k) => lines.some((l) => keyOf(l) === k));
+  if (keys.length) { state.selected = new Set(keys); applyFilters(); fitSelected(); }
+  const st = h.get('halte') && findStation(h.get('halte'));
+  if (st) { map.jumpTo({ center: [st.lon, st.lat], zoom: Math.max(map.getZoom(), 15) }); openStation(st); }
+}
+addEventListener('hashchange', applyHash);
+function share(params, title) {
+  const url = `${location.origin}${location.pathname}#${new URLSearchParams(params)}`;
+  if (navigator.share) navigator.share({ title, url }).catch(() => {}); // cancelled share sheet: fine
+  else navigator.clipboard?.writeText(url).then(() => ($('#status').textContent = 'Link gekopieerd.'), () => prompt('Kopieer deze link:', url));
+}
+// buttons inside popups and cards are created on the fly: one listener for all of them
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('.star, .share, .follow');
+  if (!b) return;
+  if (b.matches('.star')) {
+    toggleFav(b.dataset.key);
+    const fav = favs.includes(b.dataset.key);
+    b.textContent = fav ? '★' : '☆';
+    b.setAttribute('aria-pressed', fav);
+    b.setAttribute('aria-label', fav ? 'Verwijder uit favorieten' : 'Zet bij favorieten');
+  } else if (b.matches('.share')) share({ halte: b.dataset.halte }, 'Rijnmond Live');
+  else setFollow(followId === b.dataset.id ? null : b.dataset.id);
+});
+
+$('#favList').addEventListener('click', (e) => openCard(e));
+$('#nearbyList').addEventListener('click', (e) => openCard(e));
+function openCard(e) {
   const id = e.target.closest('.near-st')?.dataset.id;
   const st = id && stations.find((s) => s.id === id);
   if (!st) return;
   setSheet(false);
   map.flyTo({ center: [st.lon, st.lat], zoom: Math.max(map.getZoom(), 16), duration: reduceMotion ? 0 : 900 });
   openStation(st);
-});
+}
 
 let me;
 $('#locate').addEventListener('click', () => {

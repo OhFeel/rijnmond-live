@@ -88,7 +88,8 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
 .chip { border: 0; padding: 3px; border-radius: 11px; background: none; cursor: pointer; }
 .chip[aria-pressed="true"] { box-shadow: 0 0 0 2.5px var(--text); }
 /* line with nothing running right now: outlined instead of filled */
-.chip.idle .badge { background: transparent; color: var(--c); box-shadow: inset 0 0 0 1.5px var(--c); }
+/* text stays in the normal text colour: coloured text on the panel (e.g. yellow) wasn't readable */
+.chip.idle .badge { background: transparent; color: var(--text); box-shadow: inset 0 0 0 2px var(--c); }
 
 .credit { flex: none; padding: 8px 20px 12px; border-top: 0.5px solid var(--separator); font-size: 12px; line-height: 1.4; color: var(--text-2); }
 .credit a { color: inherit; }
@@ -120,6 +121,21 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
 .bar .on { background: var(--on-time); } .bar .late { background: var(--very-late); }
 #stats .sub { font-size: 13px; }
 .pop .stat { margin: 0 0 6px; font-size: 13px; }
+.pop h3 { justify-content: space-between; }
+.pop h4 { margin: 10px 0 2px; font-size: 13px; color: var(--text-2); font-weight: 600; }
+.pop-actions { display: inline-flex; gap: 2px; margin-left: auto; }
+.icon-btn { min-width: 36px; min-height: 36px; border: 0; border-radius: 10px; background: var(--fill); color: var(--text);
+  font: inherit; font-size: 17px; cursor: pointer; }
+.icon-btn.star[aria-pressed="true"] { color: #b25000; }
+.pop-btn { display: block; width: 100%; min-height: 44px; margin-top: 10px; border: 0; border-radius: 10px;
+  background: var(--accent); color: #fff; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.pop-btn[aria-pressed="true"] { background: var(--fill); color: var(--text); }
+/* cancelled trip: time struck through, still listed so you know not to wait for it */
+.struck, .cancelled .when b { text-decoration: line-through; color: var(--text-2); }
+.cancelled .dest { color: var(--text-2); }
+.rank, .cancel-list { list-style: none; margin: 0; padding: 0 20px 16px; }
+.rank li, .cancel-list li { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 0.5px solid var(--separator); }
+.cancel-list { max-height: none; }
 #list { list-style: none; margin: 0; padding: 0 8px 12px; overflow-y: auto; flex: 1; }
 #list button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 12px;
   border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -132,27 +148,11 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
 /* Line badge in the line's own colour: same shape on map, chips, list and popups */
 .badge { flex: none; min-width: 40px; height: 26px; padding: 0 7px; border-radius: 8px;
   display: inline-flex; align-items: center; justify-content: center; background: var(--c, #0a5fd1);
-  color: #fff; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  color: var(--t, #fff); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; } /* --t: white or dark, per line colour */
 
 .delay { flex: none; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .s-ontime { color: var(--on-time); } .s-late { color: var(--late); }
 .s-verylate { color: var(--very-late); } .s-early { color: var(--early); } .s-unknown { color: var(--unknown); }
-
-/* Vehicle markers: a disc with the mode pictogram in the line colour, a heading wedge that turns
-   with the direction of travel, and the line number beside it. MapLibre anchors the 30×30 box. */
-.veh { width: 30px; height: 30px; padding: 0; border: 0; background: none; cursor: pointer; /* no position: MapLibre sets it */ }
-.veh .disc { position: absolute; inset: 3px; border-radius: 50%; background: var(--c); display: grid; place-items: center;
-  box-shadow: 0 0 0 2px #fff, 0 2px 6px rgba(0,0,0,.35); }
-.veh .heading { position: absolute; inset: 0; transition: transform .4s linear; }
-.veh .heading::before { content: ""; position: absolute; left: 50%; top: -5px; margin-left: -5px;
-  border: 5px solid transparent; border-bottom: 7px solid var(--c); border-top: 0; filter: drop-shadow(0 -1px 0 #fff); }
-.veh .tag { position: absolute; left: 30px; top: 6px; padding: 0 5px; height: 18px; border-radius: 6px; background: var(--c);
-  color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; white-space: nowrap; box-shadow: 0 0 0 1.5px #fff; }
-.veh .dot { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%;
-  border: 1.5px solid #fff; background: var(--unknown); }
-.veh .dot.s-ontime { background: var(--on-time); } .veh .dot.s-late { background: var(--late); }
-.veh .dot.s-verylate { background: var(--very-late); } .veh .dot.s-early { background: var(--early); }
-@media (prefers-reduced-motion: reduce) { .veh .heading { transition: none; } }
 
 /* Popups */
 .maplibregl-popup-content { border-radius: 14px; color: var(--text); padding: 14px 16px; }
@@ -164,10 +164,11 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
 .pop dd { margin: 0; }
 .served { display: flex; flex-wrap: wrap; gap: 4px; margin: -2px 0 8px; }
 .badge.small { min-width: 28px; height: 20px; font-size: 12px; padding: 0 5px; border-radius: 6px; }
-.deps { list-style: none; margin: 0; padding: 0; max-height: min(300px, 40vh); overflow-y: auto; }
+.deps { list-style: none; margin: 0; padding: 0 10px 0 0; max-height: min(300px, 40vh); overflow-y: auto; } /* right padding: room for an overlay scrollbar */
 .deps li { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 0.5px solid var(--separator); }
-.deps .dest { flex: 1; min-width: 0; font-weight: 500; }
-.deps .when { display: flex; flex-direction: column; align-items: flex-end; font-variant-numeric: tabular-nums; }
+/* the time column never shrinks (it was clipped to "Op tij" on phones); a long destination gets "…" instead */
+.deps .dest { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deps .when { flex: none; display: flex; flex-direction: column; align-items: flex-end; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .deps small { font-size: 12px; font-weight: 600; }
 
 .fab { position: fixed; z-index: 2; right: 16px; bottom: 40px; width: 48px; height: 48px;
@@ -194,6 +195,7 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
   .fab { bottom: calc(var(--sheet, 120px) + 16px); transition: bottom .25s ease; }
   /* finger-sized targets: 44 px (Apple HIG / Material minimum) */
   .segmented button, .switch, #list button, .link, .near-st { min-height: 44px; }
+  .icon-btn { min-width: 44px; min-height: 44px; }
   .chip { padding: 9px 3px; }
   .chips { max-height: none; }
 }

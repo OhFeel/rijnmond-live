@@ -10,8 +10,9 @@ import unzipper from 'unzipper';
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import { Subscriber } from 'zeromq';
 import {
-  AREA, buildVehicles, stationDepartures, indexTripUpdates, parseCsvLine, parseKV6, plausibleMove,
-  groupStations, thin, modeOf, lineColor, distKm, gtfsSecs, polylineKm, punctuality, osmToRail, cleanStopName,
+  AREA, buildVehicles, stationDepartures, indexTripUpdates, parseCsvLine, parseKV6, parseKV17, plausibleMove,
+  upcomingStops, punctualityByLine, dayStart,
+  groupStations, thin, modeOf, lineColor, distKm, gtfsSecs, polylineKm, punctuality, osmToRail, cleanStopName, lineTextColor,
 } from './lib.js';
 
 const FEED = 'https://gtfs.ovapi.nl/nl';
@@ -21,13 +22,17 @@ const UA = { 'User-Agent': 'ov-live/1.0' };
 const DATA = process.env.DATA_DIR ? pathToFileURL(`${process.env.DATA_DIR.replace(/[\\/]$/, '')}/`) : new URL('./data/', import.meta.url);
 const MAX_CLIENTS = Number(process.env.MAX_CLIENTS) || 500; // live connections; each gets ~100 KB per feed update
 const ZIP = new URL('gtfs-nl.zip', DATA);
-const STATIC_CACHE = new URL('static-v9.json', DATA); // bump when the static format changes
+const STATIC_CACHE = new URL('static-v10.json', DATA); // bump when the static format changes
 const DAY = 24 * 3600e3;
 const { FeedMessage } = GtfsRealtimeBindings.transit_realtime;
 
 let routes = new Map(), stops = new Map(), stations = [], timetable = {}, tripInfo = {}, staticGz = null;
 let snapshot = { vehicles: [], fetchedAt: 0 };
 let liveTrips = new Map(), lineKeys = new Set(), lastFixes = new Map(), recentVehicles = new Map();
+let tripStops = new Map(), rtIndex = new Map(), stationName = new Map();
+const cancelled = new Map(); // KV17: "2026-11-23:QBUZZ:d033:53" → { ts, reason }
+const isoDay = (d) => `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`; // "20261123" → "2026-11-23"
+const cancelledOf = (t, d) => { const c = t.rt && cancelled.get(`${isoDay(d)}:${t.rt}`); return c ? c.reason || true : null; };
 const clients = new Set();
 // Server time for the browsers (their clocks may be off; predictions depend on "now"). Defined up here:
 // a browser can connect while the timetable is still being built further down.
@@ -42,7 +47,7 @@ const history = { date: null, frames: [], tripDelays: new Map() };
 const historyFile = (date) => new URL(`history-${date}.jsonl`, DATA);
 
 // Frame entry: [vehicle id, lon, lat, line key, delay]. The id is per trip (date:operator:line:journey).
-const noteDelays = (v) => { for (const [id, , , key, delay] of v) if (delay != null) history.tripDelays.set(id, { op: key.split('|')[0], delay }); };
+const noteDelays = (v) => { for (const [id, , , key, delay] of v) if (delay != null) history.tripDelays.set(id, { op: key.split('|')[0], key, delay }); };
 function addFrame(f) {
   history.frames.push(f);
   noteDelays(f.v);
@@ -139,7 +144,8 @@ async function buildStatic() {
   await readCsv(open('trips.txt'), (c, i) => {
     if (c[i.shape_id]) shapeRoute.set(c[i.shape_id], c[i.route_id]);
     const dates = serviceDays.get(c[i.service_id]);
-    if (dates) trips[c[i.trip_id]] = { route: c[i.route_id], headsign: c[i.trip_headsign], dates, last: 0 };
+    // rt "QBUZZ:d033:53" = the KV6/KV17 trip key without the day: links cancellations to timetable trips
+    if (dates) trips[c[i.trip_id]] = { route: c[i.route_id], headsign: c[i.trip_headsign], dates, last: 0, rt: c[i.realtime_trip_id] || null };
   });
 
   // Timetable for our stations only. stop_times is >1 GB, so one streaming pass.
@@ -298,9 +304,20 @@ async function loadStatic() {
   stations = data.stations;
   timetable = data.timetable;
   tripInfo = data.trips;
+  // per trip: the stations it calls at in seq order (follow a vehicle), its first time (cancellation list),
+  // and rt key → trip (KV17 cancellations)
+  tripStops = new Map();
+  for (const [stId, rows] of Object.entries(timetable)) for (const [tripId, secs, seq] of rows) {
+    if (!tripStops.has(tripId)) tripStops.set(tripId, []);
+    tripStops.get(tripId).push([stId, secs, seq]);
+  }
+  for (const rows of tripStops.values()) rows.sort((a, b) => a[2] - b[2]);
+  rtIndex = new Map(Object.entries(tripInfo).filter(([, t]) => t.rt).map(([id, t]) => [t.rt, id]));
+  stationName = new Map(stations.map((s) => [s.id, s.name]));
   for (const l of data.lines) { // colour is not cached: it must match the live vehicles' colour exactly
     l.operator ??= data.routes[l.routeId]?.agency;
     l.color = lineColor(l.line, l.mode, l.operator);
+    l.text = lineTextColor(l.color);
   }
   lineKeys = new Set(data.lines.map(lineKey));
   staticGz = zlib.gzipSync(JSON.stringify({ lines: data.lines, stations: stations.map(({ stopIds, ...st }) => st), area: AREA }));
@@ -347,12 +364,31 @@ function rebuild() {
   if (routes.size) record(vehicles, t); // only once line names are known
   snapshot = {
     vehicles, fetchedAt: t * 1000,
-    stats: { since: history.frames[0]?.t ?? t, operators: punctuality(history.tripDelays) },
+    stats: { since: history.frames[0]?.t ?? t, operators: punctuality(history.tripDelays),
+      lines: punctualityByLine(history.tripDelays), cancelled: cancellationsToday(now) },
   };
   snapshotIds = new Map(vehicles.map((v) => [v.id, v]));
   lastMsg = null;
   for (const res of clients) res.write(snapshotMsg());
 }
+// Cancelled trips (KV17) that touch our area, from an hour ago to 4 hours ahead, by first departure here.
+function cancellationsToday(now) {
+  const out = [];
+  for (const [id, c] of cancelled) {
+    const [day, ...rest] = id.split(':');
+    const tripId = rtIndex.get(rest.join(':')), t = tripId && tripInfo[tripId], d = day.replaceAll('-', '');
+    const first = t?.dates.includes(d) && tripStops.get(tripId)?.[0];
+    const r = first && routes.get(t.route);
+    if (!r) continue;
+    const time = dayStart(d) + first[1];
+    if (time < now - 3600 || time > now + 4 * 3600) continue;
+    const mode = modeOf(r.type), color = lineColor(r.short, mode, r.agency);
+    out.push({ key: lineKey({ operator: r.agency, mode, line: r.short }), line: r.short, color, text: lineTextColor(color),
+      operator: r.agency, destination: t.headsign ? cleanStopName(t.headsign) : '', from: stationName.get(first[0]), time, reason: c.reason });
+  }
+  return out.sort((a, b) => a.time - b.time).slice(0, 40);
+}
+
 // serialised once per change, sent to every client; patches mark it stale for the next new client
 let lastMsg = null, snapshotIds = new Map();
 const snapshotMsg = () => (lastMsg ??= `data: ${JSON.stringify(snapshot)}\n\n`);
@@ -361,7 +397,8 @@ const snapshotMsg = () => (lastMsg ??= `data: ${JSON.stringify(snapshot)}\n\n`);
 // OVapi's GTFS-rt refreshes once a minute with ~20 s old positions and says nothing about stops. KV6 reports
 // ARRIVAL / DEPARTURE / ONROUTE per vehicle as it happens. Open best-effort feed, CC0 data, fair use:
 // one connection per consumer. https://govi.nu/realtime.html
-const KV6_ENVELOPES = ['RIG', 'QBUZZ', 'ARR', 'EBS', 'CXX', 'IVU'].map((op) => `/${op}/KV6posinfo`); // RIG = RET + HTM
+// RIG = RET + HTM. KV17 = trip changes (cancellations) on the same connection.
+const KV6_ENVELOPES = ['RIG', 'QBUZZ', 'ARR', 'EBS', 'CXX', 'IVU'].flatMap((op) => [`/${op}/KV6posinfo`, `/${op}/KV17cvlinfo`]);
 const kv6 = new Map(); // vehicle id → { lon, lat, ts, vehicleNo, state, stateTs, delay }
 const ended = new Map(); // id → END time: trip finished, don't keep the vehicle around
 const patches = new Map(); // id → latest state, flushed to browsers every second
@@ -373,7 +410,9 @@ function applyKv6(v, k) {
   // hundreds of metres, and alternating sources made vehicles jump back and forth. OVapi only wins
   // again when KV6 has been silent for 2 minutes.
   if (k.lon != null && k.ts >= v.updatedAt - 120) Object.assign(v, { lon: k.lon, lat: k.lat, updatedAt: k.ts });
-  if (k.delay != null) v.delaySec = k.delay;
+  // Standing at a stop "early" means waiting for its departure time (e.g. at the first stop): it won't
+  // leave early, so that's on time — not "7 min te vroeg" on the map and in the punctuality stats.
+  if (k.delay != null) v.delaySec = k.state === 'stop' && k.delay < 0 ? 0 : k.delay;
   v.state = k.state ?? null;
   v.stateTs = k.stateTs ?? null;
 }
@@ -404,11 +443,16 @@ async function listenKv6() {
       sock.connect('tcp://pubsub.besteffort.ndovloket.nl:7658');
       for (const e of KV6_ENVELOPES) sock.subscribe(e);
       console.log('KV6-livestream verbonden');
-      for await (const [, ...parts] of sock) {
+      for await (const [env, ...parts] of sock) {
         const body = Buffer.concat(parts);
         let xml;
         try { xml = zlib.gunzipSync(body).toString(); } catch { xml = body.toString(); } // gzip, but be lenient
-        for (const ev of parseKV6(xml)) onKv6(ev);
+        if (env.toString().includes('KV17')) {
+          for (const ev of parseKV17(xml)) {
+            if (ev.type === 'CANCEL') cancelled.set(ev.id, { ts: ev.ts, reason: ev.reason });
+            else if (ev.type === 'RECOVER') cancelled.delete(ev.id);
+          }
+        } else for (const ev of parseKV6(xml)) onKv6(ev);
       }
     } catch (e) {
       console.error('KV6-livestream onderbroken, opnieuw over 30 s:', e.message ?? e.code);
@@ -430,6 +474,8 @@ setInterval(() => {
   const old = Date.now() / 1000 - 1800;
   for (const [id, k] of kv6) if ((k.stateTs ?? k.ts) < old) kv6.delete(id);
   for (const [id, t] of ended) if (t < old) ended.delete(id);
+  const yesterday = isoDay(serviceDate(-1)); // ids start with the operating day, so string order = date order
+  for (const id of cancelled.keys()) if (id.slice(0, 10) < yesterday) cancelled.delete(id);
 }, 60_000);
 
 // Timelapse downloads are big (a few MB gzipped): compress once per new frame and 10-minute window, not per request.
@@ -459,7 +505,9 @@ const handle = async (req, res) => {
   if (url.pathname === '/healthz') { // for the host's health check: live data younger than 5 min
     const ok = staticGz && Date.now() - snapshot.fetchedAt < 5 * 60e3;
     res.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ ok: !!ok, vehicles: snapshot.vehicles.length, clients: clients.size }));
+    return res.end(JSON.stringify({ ok: !!ok, vehicles: snapshot.vehicles.length, clients: clients.size,
+      kv6: kv6.size, cancellations: cancelled.size, cancellationsHere: snapshot.stats?.cancelled?.length ?? 0,
+      cancellationsOnOurTrips: [...cancelled.keys()].filter((id) => rtIndex.has(id.split(':').slice(1).join(':'))).length }));
   }
   if (url.pathname === '/api/stream') {
     if (clients.size >= MAX_CLIENTS) { res.writeHead(503, { 'Retry-After': '60' }); return res.end(); }
@@ -480,7 +528,15 @@ const handle = async (req, res) => {
   const dep = url.pathname.match(/^\/api\/station\/(st\d+)$/);
   if (dep) {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify(stationDepartures(timetable[dep[1]] ?? [], tripInfo, routes, liveTrips)));
+    const vehicleDelay = new Map(snapshot.vehicles.filter((v) => v.tripId && v.delaySec != null).map((v) => [v.tripId, v.delaySec]));
+    return res.end(JSON.stringify(stationDepartures(timetable[dep[1]] ?? [], tripInfo, routes, liveTrips, Date.now() / 1000, 10, vehicleDelay, cancelledOf)));
+  }
+  if (url.pathname === '/api/trip') { // the rest of a vehicle's trip: our stations still ahead, with expected times
+    const v = snapshotIds.get(url.searchParams.get('id') ?? ''), t = v?.tripId && tripInfo[v.tripId];
+    const day = v?.id.slice(0, 10).replaceAll('-', '');
+    const rows = t ? upcomingStops(tripStops.get(v.tripId) ?? [], t.dates.includes(day) ? day : t.dates[0], v.delaySec, Date.now() / 1000) : [];
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(rows.map((s) => ({ ...s, name: stationName.get(s.station) }))));
   }
   const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
   if (!/^[\w.-]+$/.test(file)) { res.writeHead(404); return res.end(); } // no path traversal

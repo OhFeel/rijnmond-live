@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVehicles, chainWays, osmToRail, parseKV6, plausibleMove, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
+import { buildVehicles, chainWays, lineTextColor, osmToRail, parseKV6, parseKV17, plausibleMove, punctualityByLine, upcomingStops, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
 
 test('builds nearby vehicles with delay, next stop and destination; drops far and stale ones', () => {
   const now = 1_000_000;
@@ -133,6 +133,59 @@ test('plausibleMove: rejects 10 km in 2 s, allows bus speeds and anything after 
   assert.equal(plausibleMove(a, { lat: 52.0069, lon: 4.3670, ts: 1030 }), true);  // ~690 m in 30 s = 83 km/h
   assert.equal(plausibleMove(a, { lat: 52.0611, lon: 4.4823, ts: 1060 }), true);  // a minute later: accept
   assert.equal(plausibleMove(null, a), true);
+});
+
+test('lineTextColor picks the readable text colour (dark on yellow, white on red/blue)', () => {
+  assert.equal(lineTextColor('#e6b800'), '#1c1c1e'); // metro B yellow: white was 1.9:1
+  assert.equal(lineTextColor('#e2231a'), '#fff');    // metro C red
+  assert.equal(lineTextColor('#1d5fd1'), '#fff');    // metro E blue
+  assert.equal(lineTextColor('hsl(60 65% 42%)'), '#1c1c1e'); // olive bus hue: white was 2.3:1
+  assert.equal(lineTextColor('hsl(240 65% 42%)'), '#fff');
+});
+
+test('station departures prefer the live vehicle delay (KV6) over OVapi trip updates', () => {
+  const day = '20261123', now = dayStart(day) + gtfsSecs('10:00:00');
+  const trips = { t1: { route: 'm', headsign: 'De Akkers', dates: [day], last: 30 } };
+  const routes = new Map([['m', { short: 'C', type: '1' }]]);
+  const [d] = stationDepartures([['t1', gtfsSecs('10:05:00'), 7]], trips, routes, new Map(), now, 10, new Map([['t1', 240]]));
+  assert.deepEqual([d.delaySec, d.time - now, d.live], [240, 540, true]);
+});
+
+test('parseKV17: cancel with reason, recover, prefixed and plain XML', () => {
+  const xml = `<tmi8:KV17cvlinfo><tmi8:KV17JOURNEY><tmi8:dataownercode>QBUZZ</tmi8:dataownercode><tmi8:lineplanningnumber>d033</tmi8:lineplanningnumber>
+    <tmi8:operatingday>2026-11-23</tmi8:operatingday><tmi8:journeynumber>53</tmi8:journeynumber></tmi8:KV17JOURNEY>
+    <tmi8:KV17MUTATEJOURNEY><tmi8:timestamp>2026-11-23T14:43:57.144+01:00</tmi8:timestamp><tmi8:CANCEL><tmi8:showcancelledtrip>true</tmi8:showcancelledtrip></tmi8:CANCEL></tmi8:KV17MUTATEJOURNEY></tmi8:KV17cvlinfo>
+    <KV17cvlinfo><KV17JOURNEY><dataownercode>EBS</dataownercode><lineplanningnumber>1100</lineplanningnumber><operatingday>2026-11-23</operatingday><journeynumber>1121</journeynumber></KV17JOURNEY>
+    <KV17MUTATEJOURNEY><timestamp>2026-11-23T14:44:26+01:00</timestamp><CANCEL><reasoncontent>Personeel, Logistiek</reasoncontent></CANCEL></KV17MUTATEJOURNEY>
+    <KV17MUTATEJOURNEY><timestamp>2026-11-23T14:50:00+01:00</timestamp><RECOVER/></KV17MUTATEJOURNEY></KV17cvlinfo>`;
+  const ev = parseKV17(xml.replace('<RECOVER/>', '<RECOVER></RECOVER>'));
+  assert.deepEqual(ev.map((e) => [e.id, e.type, e.reason]), [
+    ['2026-11-23:QBUZZ:d033:53', 'CANCEL', null],
+    ['2026-11-23:EBS:1100:1121', 'CANCEL', 'Personeel, Logistiek'],
+    ['2026-11-23:EBS:1100:1121', 'RECOVER', null],
+  ]);
+});
+
+test('upcomingStops: only what is still ahead, delay applied', () => {
+  const day = '20261123', now = dayStart(day) + gtfsSecs('10:00:00');
+  const rows = [['st1', gtfsSecs('09:50:00'), 1], ['st2', gtfsSecs('10:01:00'), 2], ['st3', gtfsSecs('10:10:00'), 3]];
+  assert.deepEqual(upcomingStops(rows, day, 120, now).map((s) => [s.station, s.time - now]), [['st2', 180], ['st3', 720]]);
+});
+
+test('punctualityByLine: least punctual first, lines with too few trips left out', () => {
+  const m = new Map();
+  for (let i = 0; i < 6; i++) m.set(`a${i}`, { key: 'RET|bus|33', delay: i < 3 ? 400 : 0 });  // 50% on time
+  for (let i = 0; i < 5; i++) m.set(`b${i}`, { key: 'RET|metro|C', delay: 30 });             // 100%
+  m.set('c', { key: 'RET|bus|99', delay: 900 });                                               // 1 trip: too few
+  assert.deepEqual(punctualityByLine(m).map((l) => [l.key, l.onTimePct]), [['RET|bus|33', 50], ['RET|metro|C', 100]]);
+});
+
+test('station departures: a cancelled trip stays listed, marked, without a live delay', () => {
+  const day = '20261123', now = dayStart(day) + gtfsSecs('10:00:00');
+  const trips = { t1: { route: 'b', headsign: 'Krimpen', dates: [day], last: 9, rt: 'QBUZZ:d033:53' } };
+  const cancelledOf = (t, d) => (t.rt === 'QBUZZ:d033:53' && d === day ? 'Personeel' : null);
+  const [d] = stationDepartures([['t1', gtfsSecs('10:05:00'), 2]], trips, new Map([['b', { short: '33', type: '3' }]]), new Map(), now, 10, new Map([['t1', 60]]), cancelledOf);
+  assert.deepEqual([d.cancelled, d.delaySec, d.time - now], ['Personeel', null, 300]);
 });
 
 test('helpers', () => {

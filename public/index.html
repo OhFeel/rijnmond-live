@@ -46,12 +46,16 @@
         <label class="switch"><input type="checkbox" id="showStops" checked><span>Haltes</span></label>
         <label class="switch"><input type="checkbox" id="onlyLive"><span>Alleen rijdend</span></label>
       </div>
-      <h2 id="linesTitle">Lijnen <button id="clearLines" class="link" hidden>Alles tonen</button></h2>
+      <h2 id="linesTitle">Lijnen <span><button id="shareLines" class="link" hidden>Deel</button> <button id="clearLines" class="link" hidden>Alles tonen</button></span></h2>
       <input id="lineSearch" class="search" type="search" placeholder="Zoek lijn, bestemming of vervoerder" aria-label="Zoek lijn" autocomplete="off">
       <div id="chips" class="chips" role="group" aria-labelledby="linesTitle"></div>
     </div>
 
     <section id="view-live" class="view" role="tabpanel">
+      <div id="favs" hidden>
+        <h2>Favoriete haltes</h2>
+        <div id="favList" aria-live="polite"></div>
+      </div>
       <div id="nearby" hidden>
         <h2>Bij jou in de buurt <button id="nearbyClose" class="link">Sluiten</button></h2>
         <div id="nearbyList" aria-live="polite"></div>
@@ -84,6 +88,11 @@
       <h2>Stiptheid vandaag</h2>
       <p id="statsNote" class="sub note"></p>
       <ul id="stats"></ul>
+      <h2>Minst stipte lijnen</h2>
+      <ul id="statsLines" class="rank"></ul>
+      <h2>Uitgevallen ritten</h2>
+      <p class="sub note">Ritten die de vervoerder heeft geschrapt, van een uur geleden tot 4 uur vooruit.</p>
+      <ul id="cancelList" class="deps cancel-list"></ul>
     </section>
     <footer class="credit">
       Onofficieel project, niet van RET of andere vervoerders. Posities live, deels voorspeld.

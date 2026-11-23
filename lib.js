@@ -51,6 +51,29 @@ export function parseKV6(xml) {
   return out;
 }
 
+// KV17cvlinfo XML (trip changes) → [{ id, type, ts, reason }] for whole-trip changes: CANCEL (trip won't
+// run), RECOVER (it will after all), MUTATIONMESSAGE (a note). Same id as KV6 / OVapi.
+export function parseKV17(xml) {
+  const out = [];
+  const tag = (name, s) => s.match(new RegExp(`<(?:\\w+:)?${name}>([^<]*)<`))?.[1];
+  for (const [, block] of xml.matchAll(/<(?:\w+:)?KV17cvlinfo>([\s\S]*?)<\/(?:\w+:)?KV17cvlinfo>/g)) {
+    const id = `${tag('operatingday', block)}:${tag('dataownercode', block)}:${tag('lineplanningnumber', block)}:${tag('journeynumber', block)}`;
+    for (const [, m] of block.matchAll(/<(?:\w+:)?KV17MUTATEJOURNEY>([\s\S]*?)<\/(?:\w+:)?KV17MUTATEJOURNEY>/g)) {
+      const type = m.match(/<(?:\w+:)?(CANCEL|RECOVER|MUTATIONMESSAGE)>/)?.[1];
+      if (type) out.push({ id, type, ts: Date.parse(tag('timestamp', m)) / 1000, reason: tag('reasoncontent', m) || tag('freetext', m) || null });
+    }
+  }
+  return out;
+}
+
+// The rest of a trip from now on: our stations it still calls at, with expected times (planned + delay).
+// rows: [stationId, secs, seq] sorted by seq; date "20261123"
+export function upcomingStops(rows, date, delay, now, limit = 6) {
+  const start = dayStart(date);
+  return rows.map(([station, secs]) => ({ station, planned: start + secs, time: start + secs + (delay ?? 0) }))
+    .filter((s) => s.time >= now - 60).slice(0, limit);
+}
+
 // Is moving from fix a to fix b physically possible? Faster than 40 m/s (144 km/h) within a minute is a GPS
 // glitch or another vehicle reporting the same trip; after a minute without fixes anything goes (it may
 // really have been somewhere else, and we must not get stuck on a wrong position).
@@ -127,7 +150,20 @@ export function lineColor(short, mode, operator = '') {
   if (mode === 'metro' && METRO[short]) return METRO[short];
   let h = 0; // hash includes operator + mode: RET tram 1 and HTM tram 1 are different lines
   for (const c of `${operator}|${mode}|${short}`) h = (h * 31 + c.charCodeAt(0)) % 360;
-  return `hsl(${h} ${mode === 'tram' ? 55 : 65}% 42%)`; // L 42% keeps white text ≥4.5:1 for most hues
+  return `hsl(${h} ${mode === 'tram' ? 55 : 65}% 42%)`;
+}
+
+// Text colour on a line colour: white or near-black, whichever has the higher WCAG contrast.
+// Yellows and greens (metro B, many bus hues) are too light for white text.
+const toRgb = (c) => {
+  if (c.startsWith('#')) return [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
+  const [h, s, l] = c.match(/[\d.]+/g).map(Number), a = (s / 100) * Math.min(l / 100, 1 - l / 100);
+  return [0, 8, 4].map((n) => { const k = (n + h / 30) % 12; return l / 100 - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); });
+};
+const luminance = (rgb) => rgb.map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)).reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
+export function lineTextColor(color) {
+  const L = luminance(toRgb(color)), DARK = 0.0116; // #1c1c1e
+  return 1.05 / (L + 0.05) >= (L + 0.05) / (DARK + 0.05) ? '#fff' : '#1c1c1e';
 }
 
 export function distKm(a, b) {
@@ -190,7 +226,8 @@ const routeInfo = (routes, id) => {
   const r = routes.get(id) ?? {};
   const mode = modeOf(r.type ?? 3);
   const line = r.short || id || '?';
-  return { routeId: id, line, mode, color: lineColor(line, mode, r.agency), name: r.long || '', operator: r.agency || '' };
+  const color = lineColor(line, mode, r.agency);
+  return { routeId: id, line, mode, color, text: lineTextColor(color), name: r.long || '', operator: r.agency || '' };
 };
 
 const inArea = (pos) => distKm(AREA, pos) <= AREA.radiusKm;
@@ -249,7 +286,22 @@ export function punctuality(tripDelays) {
     .sort((a, b) => b.trips - a.trips);
 }
 
-export const polylineKm = (c) => c.reduce((s, p, i) => (i ? s + distKm({ lon: c[i - 1][0], lat: c[i - 1][1] }, { lon: p[0], lat: p[1] }) : 0), 0);
+// The least punctual lines today (at least minTrips measured trips, so one bad trip doesn't top the list).
+// tripDelays values: { op, key ("RET|bus|33"), delay }
+export function punctualityByLine(tripDelays, minTrips = 5, limit = 8) {
+  const by = {};
+  for (const { key, delay } of tripDelays.values()) {
+    if (!key || delay == null) continue;
+    const o = (by[key] ??= { key, trips: 0, onTime: 0, total: 0 });
+    o.trips++; o.total += delay;
+    if (delay >= -60 && delay <= 180) o.onTime++;
+  }
+  return Object.values(by).filter((o) => o.trips >= minTrips)
+    .map((o) => ({ key: o.key, trips: o.trips, onTimePct: Math.round((o.onTime / o.trips) * 100), avgDelayMin: +(o.total / o.trips / 60).toFixed(1) }))
+    .sort((a, b) => a.onTimePct - b.onTimePct || b.avgDelayMin - a.avgDelayMin).slice(0, limit);
+}
+
+export const polylineKm =(c) => c.reduce((s, p, i) => (i ? s + distKm({ lon: c[i - 1][0], lat: c[i - 1][1] }, { lon: p[0], lat: p[1] }) : 0), 0);
 
 // "25:13:00" → seconds after service-day start (GTFS times can pass 24h)
 export const gtfsSecs = (t) => { const [h, m, s] = t.split(':'); return h * 3600 + m * 60 + +s; };
@@ -267,7 +319,10 @@ function liveDelay(tu, seq) {
 
 // Next departures at one station from the static timetable + live delays.
 // rows: [tripId, secs, seq]; trips: tripId → { route, headsign, dates, last (final stop seq) }
-export function stationDepartures(rows, trips, routes, live, now = Date.now() / 1000, limit = 10) {
+// vehicleDelay: tripId → current delay of the vehicle driving it (KV6, seconds old). It beats OVapi's trip
+// updates, which arrive every 2 min and often hold nothing — departures then wrongly said "gepland".
+// cancelledOf(trip, date): reason (or true) when KV17 cancelled that trip on that day — still listed, struck through.
+export function stationDepartures(rows, trips, routes, live, now = Date.now() / 1000, limit = 10, vehicleDelay = new Map(), cancelledOf = () => null) {
   const out = [];
   for (const [tripId, secs, seq] of rows) {
     const t = trips[tripId];
@@ -275,12 +330,13 @@ export function stationDepartures(rows, trips, routes, live, now = Date.now() / 
     for (const d of t.dates) {
       const planned = dayStart(d) + secs;
       if (planned < now - 1800 || planned > now + 7200) continue;
-      const delay = liveDelay(live.get(tripId), seq);
+      const cancelled = cancelledOf(t, d);
+      const delay = cancelled ? null : vehicleDelay.get(tripId) ?? liveDelay(live.get(tripId), seq);
       const time = planned + (delay ?? 0);
       if (time < now - 30) continue;
       const r = routeInfo(routes, t.route);
-      out.push({ line: r.line, mode: r.mode, color: r.color, destination: t.headsign ? cleanStopName(t.headsign) : r.name,
-        time, planned, delaySec: delay, live: live.has(tripId) });
+      out.push({ line: r.line, mode: r.mode, color: r.color, text: r.text, destination: t.headsign ? cleanStopName(t.headsign) : r.name,
+        time, planned, delaySec: delay, live: live.has(tripId) || vehicleDelay.has(tripId), ...(cancelled && { cancelled }) });
     }
   }
   return out.sort((a, b) => a.time - b.time).slice(0, limit);
