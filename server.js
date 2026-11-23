@@ -26,7 +26,7 @@ const { FeedMessage } = GtfsRealtimeBindings.transit_realtime;
 
 let routes = new Map(), stops = new Map(), stations = [], timetable = {}, tripInfo = {}, staticGz = null;
 let snapshot = { vehicles: [], fetchedAt: 0 };
-let liveTrips = new Map(), lineKeys = new Set();
+let liveTrips = new Map(), lineKeys = new Set(), lastFixes = new Map();
 const clients = new Set();
 
 // Same number ≠ same line: RET tram 3 and HTM tram 3 differ. Keep in sync with keyOf in public/app.js.
@@ -320,6 +320,14 @@ function rebuild() {
   const keep = (pos, r) => lineKeys.has(lineKey(r)) || distKm(AREA, pos) <= AREA.radiusKm;
   const headsignOf = (id) => (tripInfo[id]?.headsign ? cleanStopName(tripInfo[id].headsign) : null);
   const vehicles = buildVehicles(vp, liveTrips, routes, stops, Date.now() / 1000, keep, headsignOf);
+  // previous GPS fix per vehicle, so a browser can estimate speed from its very first snapshot
+  const fixes = new Map();
+  for (const v of vehicles) {
+    const p = lastFixes.get(v.id);
+    v.prev = p && p.ts !== v.updatedAt ? [p.lon, p.lat, p.ts] : p?.prev ?? null;
+    fixes.set(v.id, { lon: v.lon, lat: v.lat, ts: v.updatedAt, prev: v.prev });
+  }
+  lastFixes = fixes;
   if (routes.size) record(vehicles, t); // only once line names are known
   snapshot = {
     vehicles, fetchedAt: t * 1000,

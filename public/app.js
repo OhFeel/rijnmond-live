@@ -116,24 +116,6 @@ function pointAt(g, s) {
   return [(ax + t * (bx - ax)) / M_LON, (ay + t * (by - ay)) / M_LAT];
 }
 const bearingOf = (a, b) => (Math.atan2((b[0] - a[0]) * M_LON, (b[1] - a[1]) * M_LAT) * 180) / Math.PI;
-const metres = (a, b) => Math.hypot((a[0] - b[0]) * M_LON, (a[1] - b[1]) * M_LAT);
-// Path from a to b along the vehicle's route (track/road) when both sit on it; otherwise a straight line.
-function pathFor(key, a, b) {
-  let best = null;
-  for (const g of routeGeo.get(key) ?? []) {
-    const pa = project(g, a), pb = project(g, b);
-    if (pa.d < 60 && pb.d < 60 && Math.abs(pb.s - pa.s) < 5000 && (!best || pa.d + pb.d < best.d)) best = { g, pa, pb, d: pa.d + pb.d };
-  }
-  if (!best) return Object.assign((k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k], { side: null });
-  const { g, pa, pb } = best;
-  // follow the route, blending out the GPS offset from it so start and end match exactly (no jumps)
-  const r0 = pointAt(g, pa.s), r1 = pointAt(g, pb.s);
-  const o0 = [a[0] - r0[0], a[1] - r0[1]], o1 = [b[0] - r1[0], b[1] - r1[1]];
-  const path = (k) => { const p = pointAt(g, pa.s + (pb.s - pa.s) * k); return [p[0] + o0[0] * (1 - k) + o1[0] * k, p[1] + o0[1] * (1 - k) + o1[1] * k]; };
-  // the line's lane is on the right of the corridor's drawing direction; flip when driving the other way
-  path.side = pb.s === pa.s ? null : g.lane * Math.sign(pb.s - pa.s);
-  return path;
-}
 const LANE_PX = 9.5; // lane spacing in icon units (icon-offset scales with icon-size; ≈ line spacing at most zooms)
 
 // ---------- static layers: routes + stations ----------
@@ -145,7 +127,7 @@ async function loadStatic() {
   ({ lines, stations } = await staticData);
   lines.sort((a, b) => MODE_ORDER[a.mode] - MODE_ORDER[b.mode] || a.line.localeCompare(b.line, 'nl', { numeric: true }));
   indexRoutes();
-  for (const f of fleet.values()) if (!f.t0) Object.assign(f, placeOnRoute(f.v)); // arrived before the routes did
+  for (const f of fleet.values()) { f.fixTs = null; upsertVehicle(f.v); } // arrived before the routes did: place on route now
 
   map.addSource('lines', { type: 'geojson', data: {
     type: 'FeatureCollection',
@@ -216,37 +198,72 @@ async function loadStatic() {
   applyFilters();
 }
 
-// ---------- live vehicles: drive along the route between updates ----------
-const fleet = new Map(); // id → { v, from, to, path, t0, dur, pos, heading }
-let openPopup = null, feedInterval = 60_000, lastFetchedAt = 0;
+// ---------- live vehicles: show where a vehicle is NOW, not where its last GPS fix was ----------
+// A fix is ~20 s old on arrival and the feed refreshes once a minute. So each vehicle drives on along
+// its route at the speed measured between its last two fixes ("dead reckoning"), from the fix's own
+// timestamp, until the next fix corrects it.
+const fleet = new Map(); // id → { v, g, sFix, fixTs, speed, sDisp, off, offAt, pos, heading, side }
+let openPopup = null;
+const MAX_AHEAD_S = 90;   // never predict further than this past a fix (feed hiccup → vehicle stops)
+const MAX_SPEED = 25;     // m/s (90 km/h): faster "speeds" are GPS jumps, not driving
+const HOLD_M = 150;       // a fix behind the shown position by less than this: wait instead of reversing
 
-// Before a vehicle has moved: point it along its track/road (the feed's compass bearing picks which way)
-// and put it in its line's lane.
-function placeOnRoute(v) {
-  const p = [v.lon, v.lat];
+// closest route geometry of the vehicle's own line within 60 m (prefer the one it was already on)
+function locate(v, p, prefer) {
+  let best = null;
   for (const g of routeGeo.get(keyOf(v)) ?? []) {
-    const { d, s } = project(g, p);
-    if (d > 60) continue;
-    const h = bearingOf(pointAt(g, s - 8), pointAt(g, s + 8));
-    const back = v.bearing != null && Math.abs(((v.bearing - h + 540) % 360) - 180) > 90;
-    return { heading: back ? h + 180 : h, side: g.lane * (back ? -1 : 1) };
+    const r = project(g, p);
+    if (r.d < 60 && (!best || r.d - (g === prefer ? 20 : 0) < best.d)) best = { g, s: r.s, d: r.d };
   }
-  return { heading: v.bearing ?? 0, side: 0 };
+  return best;
 }
 
 function upsertVehicle(v) {
-  const to = [v.lon, v.lat];
   let f = fleet.get(v.id);
-  if (!f) fleet.set(v.id, (f = { pos: to, to, ...placeOnRoute(v) }));
+  if (!f) fleet.set(v.id, (f = { pos: [v.lon, v.lat], heading: v.bearing ?? 0, side: 0, speed: 0 }));
   f.v = v;
-  if (to[0] === f.to[0] && to[1] === f.to[1]) return;
-  f.from = f.pos;
-  f.to = to;
-  f.path = pathFor(keyOf(v), f.from, to);
-  if (f.path.side != null) f.side = f.path.side;
-  f.t0 = performance.now();
-  // drive the whole gap until the next position arrives, so a vehicle never stands still in between
-  f.dur = reduceMotion || metres(f.from, to) > 3000 ? 0 : Math.min(Math.max(feedInterval, 5000), 90_000);
+  if (v.updatedAt === f.fixTs) return; // same fix, only status/delay changed
+  const p = [v.lon, v.lat], loc = locate(v, p, f.g);
+  if (!loc) { Object.assign(f, { g: null, target: p, fixTs: v.updatedAt }); return; } // off-route: glide to the fix
+  // speed along the route from the previous fix (ours, or the server's on first sight)
+  const prevFix = f.g === loc.g && f.fixTs ? [f.sFix, f.fixTs] : v.prev && (() => { const r = project(loc.g, v.prev); return r.d < 60 ? [r.s, v.prev[2]] : null; })();
+  if (prevFix && v.updatedAt > prevFix[1]) {
+    const obs = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, (loc.s - prevFix[0]) / (v.updatedAt - prevFix[1])));
+    f.speed = f.g === loc.g && Math.sign(obs) === Math.sign(f.speed) ? 0.6 * obs + 0.4 * f.speed : obs; // smooth, but follow a turnaround at once
+  } else if (f.g !== loc.g) f.speed = 0;
+  if (f.g !== loc.g || f.sDisp == null) f.sDisp = loc.s; // new route geometry: start exactly at the fix
+  const r = pointAt(loc.g, loc.s);
+  Object.assign(f, { g: loc.g, sFix: loc.s, fixTs: v.updatedAt, off: [p[0] - r[0], p[1] - r[1]], offAt: performance.now() });
+  if (f.speed) f.side = loc.g.lane * Math.sign(f.speed); // lane is right of the drawing direction
+  else if (f.heading == null || !f.dirKnown) { // standing still on first sight: align with the track
+    const h = bearingOf(pointAt(loc.g, loc.s - 8), pointAt(loc.g, loc.s + 8));
+    const back = v.bearing != null && Math.abs(((v.bearing - h + 540) % 360) - 180) > 90;
+    f.heading = back ? h + 180 : h;
+    f.side = loc.g.lane * (back ? -1 : 1);
+  }
+  f.dirKnown ||= !!f.speed;
+}
+
+// where to draw a vehicle this frame (dt = seconds since the previous frame)
+function step(f, nowSec, dt, nowMs) {
+  if (!f.g) { // off-route: glide to the fix in ~1 s
+    const k = Math.min(1, dt * 3);
+    f.pos = [f.pos[0] + (f.target[0] - f.pos[0]) * k, f.pos[1] + (f.target[1] - f.pos[1]) * k];
+    return;
+  }
+  const len = f.g.cum.at(-1);
+  const age = Math.max(0, Math.min(MAX_AHEAD_S, nowSec - f.fixTs));
+  const sPred = Math.max(0, Math.min(len, f.sFix + f.speed * age));
+  const diff = sPred - f.sDisp, dir = Math.sign(f.speed);
+  // overshot (it stood at a stop): wait for the prediction instead of driving backwards
+  if (!(dir && diff * dir < 0 && Math.abs(diff) < HOLD_M)) f.sDisp += reduceMotion ? diff : diff * Math.min(1, dt * 2.5);
+  const p = pointAt(f.g, f.sDisp);
+  const fade = Math.max(0, 1 - (nowMs - f.offAt) / 3000); // GPS sits a few m beside the line: fade that in 3 s
+  f.pos = [p[0] + f.off[0] * fade, p[1] + f.off[1] * fade];
+  if (dir) { // face the direction of travel along the route, eased like steering
+    const target = bearingOf(pointAt(f.g, f.sDisp - 6 * dir), pointAt(f.g, f.sDisp + 6 * dir));
+    f.heading += (((target - f.heading + 540) % 360) - 180) * (reduceMotion ? 1 : Math.min(1, dt * 6));
+  }
 }
 
 // one feature per visible vehicle; rebuilt ~30×/s while anything moves
@@ -264,23 +281,12 @@ function vehicleFeatures() {
   return out;
 }
 
-let lastDraw = 0, dirty = true;
+let lastDraw = 0, lastFrame = performance.now(), dirty = true;
 (function animate(now) {
   if (state.view !== 'timelapse') {
-    for (const f of fleet.values()) {
-      if (!f.t0) continue;
-      const k = f.dur ? Math.min(1, (now - f.t0) / f.dur) : 1;
-      const p = f.path(k);
-      // heading from the path tangent, eased so turns look like steering, not snapping
-      const ahead = f.path(Math.min(1, k + 0.02));
-      if (metres(p, ahead) > 0.5) {
-        const target = bearingOf(p, ahead);
-        f.heading += (((target - f.heading + 540) % 360) - 180) * (reduceMotion ? 1 : 0.12);
-      }
-      f.pos = p;
-      if (k === 1) f.t0 = 0;
-      dirty = true;
-    }
+    const dt = Math.min(1, (now - lastFrame) / 1000), nowSec = Date.now() / 1000; // shortcut: assumes the viewer's clock is right (±a few s)
+    for (const f of fleet.values()) step(f, nowSec, dt, now);
+    dirty = fleet.size > 0;
     if (dirty && now - lastDraw > 33 && map.getSource('vehicles')) {
       map.getSource('vehicles').setData({ type: 'FeatureCollection', features: vehicleFeatures() });
       if (openPopup?.ref?.startsWith('veh:')) { const f = fleet.get(openPopup.ref.slice(4)); if (f) openPopup.setLngLat(f.pos); }
@@ -288,6 +294,7 @@ let lastDraw = 0, dirty = true;
       dirty = false;
     }
   }
+  lastFrame = now;
   requestAnimationFrame(animate);
 })(performance.now());
 
@@ -412,10 +419,6 @@ function tick() {
 
 // ---------- live updates (server pushes as soon as OVapi has new data) ----------
 function onSnapshot(data) {
-  if (data.fetchedAt !== lastFetchedAt) {
-    if (lastFetchedAt) feedInterval = Math.min(Math.max(data.fetchedAt - lastFetchedAt, 5000), 90_000);
-    lastFetchedAt = data.fetchedAt;
-  }
   vehicles = data.vehicles;
   fetchedAt = data.fetchedAt;
   stats = data.stats;
