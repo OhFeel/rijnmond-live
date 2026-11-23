@@ -45,6 +45,8 @@
         <label class="switch"><input type="checkbox" id="showLines" checked><span>Routes</span></label>
         <label class="switch"><input type="checkbox" id="showStops" checked><span>Haltes</span></label>
         <label class="switch"><input type="checkbox" id="onlyLive"><span>Alleen rijdend</span></label>
+        <label class="switch"><input type="checkbox" id="delayMap"><span>Waar vertraging ontstaat</span></label>
+        <p id="delayLegend" class="legend" hidden></p>
       </div>
       <h2 id="linesTitle">Lijnen <span><button id="shareLines" class="link" hidden>Deel</button> <button id="clearLines" class="link" hidden>Alles tonen</button></span></h2>
       <input id="lineSearch" class="search" type="search" placeholder="Zoek lijn, bestemming of vervoerder" aria-label="Zoek lijn" autocomplete="off">
@@ -52,6 +54,10 @@
     </div>
 
     <section id="view-live" class="view" role="tabpanel">
+      <div id="lineView" hidden>
+        <h2 id="lineViewTitle">Lijnoverzicht</h2>
+        <ol id="lineDiagram" class="diagram" aria-labelledby="lineViewTitle"></ol>
+      </div>
       <div id="favs" hidden>
         <h2>Favoriete haltes</h2>
         <div id="favList" aria-live="polite"></div>
@@ -88,6 +94,8 @@
       <h2>Stiptheid vandaag</h2>
       <p id="statsNote" class="sub note"></p>
       <ul id="stats"></ul>
+      <h2>Afgelopen dagen</h2>
+      <div id="daily" class="daily"></div>
       <h2>Minst stipte lijnen</h2>
       <ul id="statsLines" class="rank"></ul>
       <h2>Uitgevallen ritten</h2>
@@ -102,6 +110,11 @@
       <a href="https://openfreemap.org" rel="noopener" target="_blank">OpenFreeMap</a>.
     </footer>
   </aside>
+
+  <div id="alarm" class="alarm" role="status" aria-live="polite" hidden>
+    <span id="alarmText"></span>
+    <button id="alarmClose" class="icon-btn" aria-label="Wekker uitzetten">✕</button>
+  </div>
 
   <button id="locate" class="fab" aria-label="Toon mijn locatie">
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M21 3 3 10.5l7.2 2.3L12.5 20z"/></svg>

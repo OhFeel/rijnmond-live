@@ -18,13 +18,16 @@ reken op een paar minuten. Daarna komt alles uit de cache in `data/`.
 
 ## Online zetten (VPS met Docker)
 
-Een kleine VPS is genoeg: 1 vCPU, **1 GB RAM** (het verwerken van de dienstregeling piekte in een test op
-±500 MB) en 5 GB schijf. Op de server:
+Een kleine VPS is genoeg: 1 vCPU, **2 GB RAM** (gemeten in Docker: ±1,1 GB in gebruik terwijl hij draait,
+stabiel) en 5 GB schijf. Op de server:
 
 ```
 docker build -t rijnmond-live .
-docker run -d --name rijnmond-live --restart unless-stopped -p 127.0.0.1:3000:3000 -v rijnmond-data:/data rijnmond-live
+mkdir -p ~/rijnmond-live-data
+docker run -d --name rijnmond-live --restart unless-stopped -p 3000:3000 -v $HOME/rijnmond-live-data:/data rijnmond-live
 ```
+
+(`-p 127.0.0.1:3000:3000` in plaats van `-p 3000:3000` als alleen een reverse proxy op dezelfde machine erbij mag.)
 
 Zet er een reverse proxy met HTTPS voor. Met [Caddy](https://caddyserver.com) is dat één bestand
 (`/etc/caddy/Caddyfile`), Caddy regelt het certificaat zelf:
@@ -39,6 +42,14 @@ jouwdomein.nl {
 
 `flush_interval -1` is nodig voor de live-updates (Server-Sent Events). Gezondheid controleren:
 `curl https://jouwdomein.nl/healthz`.
+
+Bijwerken naar de nieuwste versie (de data-map blijft staan, dus geen nieuwe downloads):
+
+```
+cd ~/rijnmond-live && git pull && docker build -t rijnmond-live . \
+  && docker rm -f rijnmond-live \
+  && docker run -d --name rijnmond-live --restart unless-stopped -p 3000:3000 -v $HOME/rijnmond-live-data:/data rijnmond-live
+```
 
 Fly.io, Railway en vergelijkbare hosts werken ook: gebruik de Dockerfile, koppel een volume op `/data`
 en geef de machine 1 GB geheugen.

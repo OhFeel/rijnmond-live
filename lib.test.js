@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVehicles, chainWays, lineTextColor, osmToRail, parseKV6, parseKV17, plausibleMove, punctualityByLine, upcomingStops, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
+import { buildVehicles, chainWays, dayPunctuality, delayGainCells, lineTextColor, lineView, osmToRail, parseKV6, parseKV17, plausibleMove, punctualityByLine, upcomingStops, rdToWgs84, vehicleModel, dayStart, groupStations, gtfsSecs, indexTripUpdates, modeOf, parseCsvLine, punctuality, stationDepartures, thin } from './lib.js';
 
 test('builds nearby vehicles with delay, next stop and destination; drops far and stale ones', () => {
   const now = 1_000_000;
@@ -186,6 +186,30 @@ test('station departures: a cancelled trip stays listed, marked, without a live 
   const cancelledOf = (t, d) => (t.rt === 'QBUZZ:d033:53' && d === day ? 'Personeel' : null);
   const [d] = stationDepartures([['t1', gtfsSecs('10:05:00'), 2]], trips, new Map([['b', { short: '33', type: '3' }]]), new Map(), now, 10, new Map([['t1', 60]]), cancelledOf);
   assert.deepEqual([d.cancelled, d.delaySec, d.time - now], ['Personeel', null, 300]);
+});
+
+test('lineView places vehicles just before their next station, per direction', () => {
+  const day = '20261123', now = dayStart(day) + gtfsSecs('10:00:00');
+  const order = ['a', 'b', 'c', 'd'];
+  const s = (h) => gtfsSecs(h);
+  const out = lineView(order, [
+    { id: 'up', date: day, delay: 0, rows: [['a', s('09:50:00'), 1], ['b', s('09:55:00'), 2], ['c', s('10:02:00'), 3], ['d', s('10:08:00'), 4]] },
+    { id: 'down', date: day, delay: 120, rows: [['d', s('09:50:00'), 1], ['c', s('09:57:00'), 2], ['b', s('10:01:00'), 3], ['a', s('10:06:00'), 4]] },
+    { id: 'done', date: day, delay: 0, rows: [['a', s('09:00:00'), 1], ['b', s('09:10:00'), 2]] },
+  ], now);
+  assert.deepEqual(out.map((v) => [v.id, v.at, v.dir, v.nextStation]), [['up', 1.5, 1, 'c'], ['down', 1.5, -1, 'b']]);
+});
+
+test('delayGainCells credits delay growth to where it happened', () => {
+  const frames = [];
+  for (let i = 0; i < 6; i++) frames.push({ t: 1000 + i * 60, v: [['bus1', 4.5, 51.9, 'RET|bus|1', i * 30], ['bus2', 4.6, 51.95, 'RET|bus|2', 0]] });
+  const cells = delayGainCells(frames, 0.0025, 5);
+  assert.deepEqual(cells.map((c) => [c.lon, c.gain, c.n]).sort(), [[4.5, 30, 5], [4.6, 0, 5]]);
+});
+
+test('dayPunctuality: last delay per trip of a recorded day', () => {
+  const frames = [{ t: 1, v: [['a', 0, 0, 'RET|bus|1', 600], ['b', 0, 0, 'RET|bus|2', 0]] }, { t: 2, v: [['a', 0, 0, 'RET|bus|1', 60]] }];
+  assert.deepEqual(dayPunctuality(frames).map((o) => [o.operator, o.trips, o.onTimePct]), [['RET', 2, 100]]);
 });
 
 test('helpers', () => {

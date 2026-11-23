@@ -205,6 +205,12 @@ async function loadStatic() {
     paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 2.5, 16, 9], 'circle-color': '#fff',
       'circle-stroke-color': dark ? '#f2f2f7' : '#1c1c1e', 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 9, 1.2, 16, 3.5] } });
 
+  // where delay arises (toggle): green = delay shrinks there, red = grows; drawn under the vehicles
+  map.addSource('delaymap', { type: 'geojson', data: EMPTY });
+  map.addLayer({ id: 'delaymap', type: 'circle', source: 'delaymap',
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 4, 15, 14], 'circle-opacity': 0.7, 'circle-blur': 0.3,
+      'circle-color': ['interpolate', ['linear'], ['get', 'gain'], -30, '#1b7f3b', 0, '#e6b800', 60, '#c5221f'] } });
+
   // live vehicles: sprite rotated with the direction of travel, shifted into its line's lane on shared
   // track; label = line number plus delay in minutes when ≥1 min off ("B +4")
   map.addSource('vehicles', { type: 'geojson', data: EMPTY });
@@ -235,6 +241,7 @@ async function loadStatic() {
   });
   applyFilters();
   renderFavs();
+  refreshAlarm();
   applyHash(); // opened via a shared link
 }
 
@@ -421,7 +428,8 @@ function openVehicle(id, fly) {
 }
 
 // departures of a station (no arrivals at their own terminus), as list rows; shared by popup, favourites, nearby
-const stationDeps = (st) => fetch(`/api/station/${st.id}`).then((r) => r.json()).catch(() => null);
+const depIndex = new Map(); // trip → { departure, station key } of rows on screen
+const stationDeps =(st) => fetch(`/api/station/${st.id}`).then((r) => r.json()).catch(() => null);
 function depRows(deps, st, max) {
   const now = nowMs() / 1000;
   const shown = (deps ?? []).filter((d) => modeOk(d) && d.destination !== st.name).slice(0, max);
@@ -429,7 +437,10 @@ function depRows(deps, st, max) {
     const s = d.cancelled ? { cls: 's-verylate', text: 'Vervalt' } : d.delaySec == null ? { cls: 's-unknown', text: 'gepland' } : status(d.delaySec);
     const min = Math.round((d.time - now) / 60);
     const why = typeof d.cancelled === 'string' ? ` title="${esc(d.cancelled)}"` : '';
-    return `<li${d.cancelled ? ' class="cancelled"' : ''}>${badge(d)}<span class="dest">${esc(d.destination ?? '')}</span>
+    depIndex.set(d.trip, { d, station: stationKey(st) }); // for the alarm: tapping a row sets it
+    const on = alarm?.trip === d.trip;
+    return `<li class="dep${d.cancelled ? ' cancelled' : ''}${on ? ' alarm-on' : ''}" data-trip="${esc(d.trip)}" tabindex="0" role="button"
+      aria-label="${esc(`${d.line} naar ${d.destination ?? ''}`)}: ${on ? 'wekker staat aan, tik om uit te zetten' : 'tik voor een vertrekwekker'}">${badge(d)}<span class="dest">${on ? '⏰ ' : ''}${esc(d.destination ?? '')}</span>
       <span class="when"${why}><b>${min <= 0 ? 'nu' : min < 30 ? `${min} min` : clock(d.time)}</b><small class="${s.cls}">${esc(s.text)}</small></span></li>`;
   }).join('') };
 }
@@ -493,6 +504,7 @@ function applyFilters() {
   dirty = true;
   renderChips();
   renderList();
+  renderLineView();
   tick();
 }
 
@@ -534,6 +546,15 @@ function renderStats() {
       <span class="on" style="width:${o.onTimePct}%"></span><span class="late" style="width:${o.latePct}%"></span></div>
     <div class="sub">${o.trips} ritten · ${o.latePct}% >3 min te laat · gem. ${o.avgDelayMin > 0 ? '+' : ''}${String(o.avgDelayMin).replace('.', ',')} min</div>
   </li>`).join('') : '<li class="empty">Nog geen metingen. Even wachten op de eerste posities.</li>';
+  // last days: operators as rows (biggest first, by today's trips), days as columns, % on time per cell
+  const days = stats.daily ?? [], ops = (days.at(-1)?.operators ?? []).slice(0, 6).map((o) => o.operator);
+  const dayName = (d) => new Date(+d.slice(0, 4), d.slice(4, 6) - 1, +d.slice(6)).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric' });
+  const cell = (o) => !o ? '<td class="na">–</td>'
+    : `<td class="${o.onTimePct >= 85 ? 'good' : o.onTimePct >= 70 ? 'mid' : 'bad'}" title="${o.trips} ritten">${o.onTimePct}%</td>`;
+  $('#daily').innerHTML = ops.length ? `<table><thead><tr><th></th>${days.map((d, i) => `<th scope="col">${i === days.length - 1 ? 'vandaag' : dayName(d.date)}</th>`).join('')}</tr></thead>
+    <tbody>${ops.map((op) => `<tr><th scope="row">${esc(op)}</th>${days.map((d) => cell(d.operators.find((o) => o.operator === op))).join('')}</tr>`).join('')}</tbody></table>
+    ${days.length < 2 ? '<p class="sub note">De opname loopt sinds vandaag; de komende dagen vult dit zich aan tot een week.</p>' : ''}`
+    : '<p class="sub note">Nog geen metingen.</p>';
   const lineOf = (k) => lines.find((l) => keyOf(l) === k) ?? { line: k.split('|')[2], color: '#6e6e73' };
   $('#statsLines').innerHTML = (stats.lines ?? []).map((l) => `<li>${badge(lineOf(l.key))}
     <span class="meta"><span class="dest">${l.onTimePct}% op tijd</span><span class="op">${esc(lineOf(l.key).operator ?? '')} · ${l.trips} ritten · gem. ${l.avgDelayMin > 0 ? '+' : ''}${String(l.avgDelayMin).replace('.', ',')} min</span></span></li>`).join('')
@@ -699,6 +720,7 @@ $('#shareLines').addEventListener('click', () => share({ lijn: [...state.selecte
 for (const [id, key] of [['#showLines', 'showLines'], ['#showStops', 'showStops'], ['#onlyLive', 'onlyLive']]) {
   $(id).addEventListener('change', (e) => { state[key] = e.target.checked; applyFilters(); });
 }
+$('#delayMap').addEventListener('change', (e) => { state.delayMap = e.target.checked; loadDelayMap(); });
 $('#list').addEventListener('click', (e) => {
   const id = e.target.closest('button')?.dataset.id;
   if (!id) return;
@@ -715,6 +737,95 @@ $('#view-timelapse .segmented').addEventListener('click', (e) => {
   document.querySelectorAll('#view-timelapse .segmented button').forEach((x) => x.setAttribute('aria-checked', x === b));
 });
 $('#tlTrails').addEventListener('change', (e) => { tl.trails = e.target.checked; if (tl.tracks) drawTimelapse(); });
+
+// ---------- line overview, metro-board style: shown when exactly one line is selected ----------
+// Stations top to bottom; vehicles in the gap before the station they head for. Left column ↓ = driving
+// down the list, right column ↑ = up. Tap a vehicle to fly to it.
+async function renderLineView() {
+  const key = state.view === 'live' && state.selected.size === 1 ? [...state.selected][0] : null;
+  $('#lineView').hidden = !key;
+  if (!key) return;
+  const l = lines.find((x) => keyOf(x) === key);
+  if (!l) { $('#lineView').hidden = true; return; }
+  const data = await fetch(`/api/line?key=${encodeURIComponent(key)}`).then((r) => r.json()).catch(() => null);
+  if (![...state.selected].includes(key)) return; // selection changed meanwhile
+  const stops = data?.stops ?? [];
+  $('#lineViewTitle').textContent = stops.length > 1 ? `Lijn ${l.line}: ${stops[0].name} – ${stops.at(-1).name}` : `Lijn ${l.line}`;
+  if (stops.length < 2) { $('#lineDiagram').innerHTML = '<li class="empty">Geen haltes van deze lijn in het gebied.</li>'; return; }
+  const slots = Array.from({ length: stops.length * 2 - 1 }, () => ({ down: [], up: [] }));
+  for (const v of data.vehicles) slots[Math.round(v.at * 2)]?.[v.dir > 0 ? 'down' : 'up'].push(v);
+  const chip = (v) => {
+    const late = v.delay != null && Math.abs(v.delay) >= 60 ? ` ${v.delay > 0 ? '+' : '−'}${Math.round(Math.abs(v.delay) / 60)}` : '';
+    return `<button class="vchip" data-id="${esc(v.id)}" style="--c:${l.color};--t:${l.text}" aria-label="${MODE_NAME[l.mode] ?? ''} ${esc(l.line)}${v.vehicleNo ? ` ${esc(v.vehicleNo)}` : ''}, ${v.dir > 0 ? 'richting ' + esc(stops.at(-1).name) : 'richting ' + esc(stops[0].name)}${late ? `, ${late.trim()} min` : ''}">${v.dir > 0 ? '↓' : '↑'}${esc(late)}</button>`;
+  };
+  $('#lineDiagram').innerHTML = slots.map((s, k) => {
+    const stop = k % 2 === 0 ? stops[k / 2] : null;
+    if (!stop && !s.down.length && !s.up.length) return '<li class="gap" aria-hidden="true"><span></span><span class="track" style="--c:' + l.color + '"></span></li>';
+    return `<li class="${stop ? 'stop' : 'gap'}"><span class="side">${s.down.map(chip).join('')}</span>
+      <span class="track" style="--c:${l.color}">${stop ? '<i></i>' : ''}</span>
+      <span class="name">${stop ? esc(stop.name) : ''}</span><span class="side">${s.up.map(chip).join('')}</span></li>`;
+  }).join('');
+}
+$('#lineDiagram').addEventListener('click', (e) => {
+  const id = e.target.closest('.vchip')?.dataset.id;
+  if (!id) return;
+  setSheet(false);
+  openVehicle(id, true);
+});
+setInterval(() => !$('#lineView').hidden && renderLineView(), 15_000);
+
+// ---------- "where delay arises": cells where vehicles' delay grows (last 6 h of the recording) ----------
+async function loadDelayMap() {
+  const cells = state.delayMap ? await fetch('/api/delaymap').then((r) => r.json()).catch(() => []) : [];
+  map.getSource('delaymap')?.setData({ type: 'FeatureCollection', features: cells.map((c) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: [c.lon, c.lat] }, properties: { gain: c.gain, n: c.n } })) });
+  $('#delayLegend').hidden = !state.delayMap;
+  if (state.delayMap && !cells.length) $('#delayLegend').textContent = 'Nog te weinig opgenomen voor de vertragingskaart.';
+  else $('#delayLegend').innerHTML = '<span class="dot g"></span>vertraging neemt af <span class="dot y"></span>gelijk <span class="dot r"></span>neemt toe (laatste 6 uur)';
+}
+setInterval(() => state.delayMap && loadDelayMap(), 5 * 60_000);
+
+// ---------- departure alarm: count down to one departure, signal at 2 minutes (while the app is open) ----------
+let alarm = store.get('rl-alarm', null), alarmDep = null, alarmRang = false;
+async function refreshAlarm() {
+  if (!alarm) return;
+  const st = findStation(alarm.station);
+  const deps = st && await stationDeps(st);
+  alarmDep = deps?.find((d) => d.trip === alarm.trip) ?? alarmDep; // gone from the list = departed
+}
+function setAlarm(a) {
+  alarm = a; alarmDep = null; alarmRang = false;
+  store.set('rl-alarm', a);
+  if (a && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  refreshAlarm().then(tickAlarm);
+}
+function ring() {
+  navigator.vibrate?.([300, 150, 300]);
+  try { // short two-tone beep; no audio file needed
+    const ctx = new AudioContext();
+    [0, 0.25].forEach((t, i) => { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = i ? 880 : 660;
+      g.gain.setValueAtTime(0.2, ctx.currentTime + t); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.2);
+      o.connect(g).connect(ctx.destination); o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.22); });
+  } catch {}
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(`${alarm.line} naar ${alarm.destination}`, { body: 'Vertrekt over 2 minuten', icon: 'icon-192.png' }); } catch {}
+  }
+}
+function tickAlarm() {
+  $('#alarm').hidden = !alarm;
+  if (!alarm) return;
+  const time = alarmDep?.time ?? alarm.time, left = Math.round(time - nowMs() / 1000);
+  const what = `${alarm.line} naar ${alarm.destination}`;
+  if (alarmDep?.cancelled) $('#alarmText').textContent = `⏰ ${what} vervalt`;
+  else if (left < -60) { $('#alarmText').textContent = `⏰ ${what} is vertrokken`; if (left < -180) setAlarm(null); }
+  else $('#alarmText').textContent = `⏰ ${what}: ${left <= 30 ? 'vertrekt nu' : `nog ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`}${alarmDep?.delaySec >= 60 ? ` (+${Math.round(alarmDep.delaySec / 60)})` : ''}`;
+  if (!alarmRang && left <= 120 && left > -60 && !alarmDep?.cancelled) { alarmRang = true; ring(); }
+  $('#alarm').style.setProperty('--c', alarm.color);
+}
+$('#alarmClose').addEventListener('click', () => setAlarm(null));
+setInterval(tickAlarm, 1000);
+setInterval(refreshAlarm, 30_000);
+refreshAlarm();
 
 // ---------- "Bij jou in de buurt": the nearest stops with their next departures, refreshed every 30 s ----------
 const metres = (a, b) => Math.hypot((a[0] - b[0]) * M_LON, (a[1] - b[1]) * M_LAT);
@@ -770,8 +881,23 @@ function share(params, title) {
   if (navigator.share) navigator.share({ title, url }).catch(() => {}); // cancelled share sheet: fine
   else navigator.clipboard?.writeText(url).then(() => ($('#status').textContent = 'Link gekopieerd.'), () => prompt('Kopieer deze link:', url));
 }
+// tapping a departure row (popup, favourites, nearby) toggles the alarm for it
+function toggleAlarmFor(row) {
+  const hit = depIndex.get(row.dataset.trip);
+  if (!hit || hit.d.cancelled) return;
+  const { d, station } = hit;
+  setAlarm(alarm?.trip === d.trip ? null : { trip: d.trip, station, line: d.line, color: d.color, text: d.text, destination: d.destination ?? '', time: d.time });
+  for (const li of document.querySelectorAll('li.dep')) { // mark rows without re-fetching
+    const on = alarm?.trip === li.dataset.trip;
+    li.classList.toggle('alarm-on', on);
+  }
+}
+document.addEventListener('keydown', (e) => { const row = e.target.closest?.('li.dep'); if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleAlarmFor(row); } });
+
 // buttons inside popups and cards are created on the fly: one listener for all of them
 document.addEventListener('click', (e) => {
+  const row = e.target.closest('li.dep');
+  if (row && !e.target.closest('.near-st')) { toggleAlarmFor(row); return; }
   const b = e.target.closest('.star, .share, .follow');
   if (!b) return;
   if (b.matches('.star')) {

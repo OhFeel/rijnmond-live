@@ -133,6 +133,45 @@ h2 { display: flex; justify-content: space-between; align-items: baseline; margi
 /* cancelled trip: time struck through, still listed so you know not to wait for it */
 .struck, .cancelled .when b { text-decoration: line-through; color: var(--text-2); }
 .cancelled .dest { color: var(--text-2); }
+/* Line overview (metro board): [↓ vehicles] [track] [station] [↑ vehicles] */
+.diagram { list-style: none; margin: 0 0 12px; padding: 0 16px; }
+.diagram li { display: grid; grid-template-columns: 64px 18px 1fr 64px; align-items: center; min-height: 10px; }
+.diagram li.stop { min-height: 32px; }
+.diagram .side { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: wrap; }
+.diagram .side:last-child { justify-content: flex-start; }
+.diagram .track { position: relative; align-self: stretch; }
+.diagram .track::before { content: ""; position: absolute; left: 7px; top: 0; bottom: 0; width: 4px; background: var(--c); }
+.diagram li:first-child .track::before { top: 50%; } .diagram li:last-child .track::before { bottom: 50%; }
+.diagram .track i { position: absolute; left: 3px; top: 50%; width: 12px; height: 12px; margin-top: -6px; border-radius: 50%;
+  background: var(--solid); border: 3px solid var(--c); box-sizing: border-box; }
+.diagram .name { padding-left: 6px; font-size: 14px; }
+.vchip { min-height: 26px; padding: 0 6px; border: 0; border-radius: 7px; background: var(--c); color: var(--t, #fff);
+  font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+
+/* where delay arises: legend under the switch */
+.legend { flex-basis: 100%; margin: 0; font-size: 13px; color: var(--text-2); }
+.legend .dot { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 8px; border-radius: 50%; vertical-align: -1px; }
+.legend .dot:first-child { margin-left: 0; }
+.legend .g { background: #1b7f3b; } .legend .y { background: #e6b800; } .legend .r { background: #c5221f; }
+
+/* last days punctuality grid */
+.daily { padding: 0 20px 8px; overflow-x: auto; }
+.daily table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.daily th, .daily td { padding: 4px 6px; text-align: center; white-space: nowrap; }
+.daily th[scope="row"] { text-align: left; font-weight: 600; }
+.daily thead th { color: var(--text-2); font-weight: 500; }
+.daily td { border-radius: 6px; font-weight: 600; }
+.daily .good { color: var(--on-time); } .daily .mid { color: var(--late); } .daily .bad { color: var(--very-late); } .daily .na { color: var(--text-2); }
+
+/* departure alarm: tap a departure row; banner on top counts down */
+li.dep { cursor: pointer; }
+li.dep:hover { background: var(--fill); }
+li.alarm-on { box-shadow: inset 3px 0 0 var(--accent); }
+.alarm { position: fixed; z-index: 3; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
+  max-width: calc(100vw - 24px); padding: 6px 6px 6px 16px; border-radius: 22px; background: var(--solid); color: var(--text);
+  box-shadow: 0 8px 32px rgba(0,0,0,.25), inset 4px 0 0 var(--c, var(--accent)); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (min-width: 701px) { .alarm { left: calc(50% + 195px); } } /* centre over the map, not over the panel */
+
 .rank, .cancel-list { list-style: none; margin: 0; padding: 0 20px 16px; }
 .rank li, .cancel-list li { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 0.5px solid var(--separator); }
 .cancel-list { max-height: none; }

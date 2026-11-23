@@ -74,6 +74,51 @@ export function upcomingStops(rows, date, delay, now, limit = 6) {
     .filter((s) => s.time >= now - 60).slice(0, limit);
 }
 
+// Metro-board view of a line: the stations of its longest trip in order, and each vehicle placed just
+// before the station it heads for. dir +1 = same direction as that trip, -1 = the other way.
+// order: [stationId]; vehicles: [{ id, rows: [[stationId, secs, seq]], date, delay, ...rest }]
+export function lineView(order, vehicles, now) {
+  const idx = new Map(order.map((id, i) => [id, i]));
+  const out = [];
+  for (const { rows, date, delay, ...v } of vehicles) {
+    const known = rows.filter(([st]) => idx.has(st));
+    if (known.length < 2) continue;
+    const dir = Math.sign(idx.get(known.at(-1)[0]) - idx.get(known[0][0])) || 1;
+    // strictly ahead (no minute of grace like upcomingStops): a stop passed a moment ago is not "next"
+    const start = dayStart(date), next = known.find(([, secs]) => start + secs + (delay ?? 0) >= now);
+    if (!next) continue; // trip finished
+    const at = Math.max(0, Math.min(order.length - 1, idx.get(next[0]) - 0.5 * dir));
+    out.push({ ...v, at, dir, delay, nextStation: next[0], nextTime: start + next[1] + (delay ?? 0) });
+  }
+  return out;
+}
+
+// Where does delay arise? For every vehicle, the change in its delay between two recordings (≤ 3 min apart)
+// is credited to the ~250 m cell where it was at the second one. Cells with a positive average = delay grows there.
+// frames: [{ t, v: [[id, lon, lat, key, delay]] }]
+export function delayGainCells(frames, cell = 0.0025, minSamples = 5) {
+  const last = new Map(), cells = new Map();
+  for (const f of frames) {
+    for (const [id, lon, lat, , delay] of f.v) {
+      const p = last.get(id);
+      if (delay != null) last.set(id, { t: f.t, delay });
+      if (!p || delay == null || f.t - p.t > 180 || f.t <= p.t) continue;
+      const k = `${Math.round(lon / cell)},${Math.round(lat / (cell * 0.62))}`; // ~square cells at 52° N
+      const c = cells.get(k) ?? cells.set(k, { lon: 0, lat: 0, gain: 0, n: 0 }).get(k);
+      c.lon += lon; c.lat += lat; c.gain += delay - p.delay; c.n++;
+    }
+  }
+  return [...cells.values()].filter((c) => c.n >= minSamples)
+    .map((c) => ({ lon: +(c.lon / c.n).toFixed(5), lat: +(c.lat / c.n).toFixed(5), gain: Math.round(c.gain / c.n), n: c.n }));
+}
+
+// Punctuality per operator for one recorded day (last known delay per trip, like the live stats).
+export function dayPunctuality(frames) {
+  const trips = new Map();
+  for (const f of frames) for (const [id, , , key, delay] of f.v) if (delay != null) trips.set(id, { op: key.split('|')[0], delay });
+  return punctuality(trips);
+}
+
 // Is moving from fix a to fix b physically possible? Faster than 40 m/s (144 km/h) within a minute is a GPS
 // glitch or another vehicle reporting the same trip; after a minute without fixes anything goes (it may
 // really have been somewhere else, and we must not get stuck on a wrong position).
@@ -335,7 +380,7 @@ export function stationDepartures(rows, trips, routes, live, now = Date.now() / 
       const time = planned + (delay ?? 0);
       if (time < now - 30) continue;
       const r = routeInfo(routes, t.route);
-      out.push({ line: r.line, mode: r.mode, color: r.color, text: r.text, destination: t.headsign ? cleanStopName(t.headsign) : r.name,
+      out.push({ trip: `${tripId}@${d}`, line: r.line, mode: r.mode, color: r.color, text: r.text, destination: t.headsign ? cleanStopName(t.headsign) : r.name,
         time, planned, delaySec: delay, live: live.has(tripId) || vehicleDelay.has(tripId), ...(cancelled && { cancelled }) });
     }
   }
